@@ -24,7 +24,7 @@ A simple yet powerful desktop app that allows you to view and search all logs fr
 1. **Install ADB**  
    Make sure [Android Debug Bridge (ADB)](https://developer.android.com/tools/adb) is installed and added to your system's path.
 
-2. Set the adb path here: let adbPath: String = "/opt/homebrew/bin/adb"
+2. Set the adb path here ``` let adbPath: String = "/opt/homebrew/bin/adb" ```
 
 3. **Connect Your Device**  
    Enable developer mode and USB debugging on your Android device, then connect it via USB.
