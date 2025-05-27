@@ -36,7 +36,7 @@ A simple yet powerful desktop app that allows you to view and search all logs fr
 
 - ADB installed on your system.
 - Android device with USB debugging enabled.
-- Desktop environment (Windows/Linux/macOS).
+- Desktop environment macOS.
 
 ## 📸 Preview
 
