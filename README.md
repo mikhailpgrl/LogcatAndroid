@@ -1,6 +1,7 @@
 # Android Log Viewer via ADB
 
-![Preview](https://github.com/user-attachments/assets/b3d523eb-ff09-407b-a719-0fca4f72205b)
+<img width="932" alt="Capture d’écran 2025-05-27 à 15 48 10" src="https://github.com/user-attachments/assets/0ad5c2fd-d12f-435b-9f4d-01b4a19ed188" alt="drawing" width="200"/>
+
 
 A simple yet powerful desktop app that allows you to view and search all logs from connected Android devices using ADB. Ideal for developers and testers who need real-time logging with flexible filtering and device management.
 
@@ -37,11 +38,6 @@ A simple yet powerful desktop app that allows you to view and search all logs fr
 - ADB installed on your system.
 - Android device with USB debugging enabled.
 - Desktop environment macOS.
-
-## 📸 Preview
-
-![App Screenshot](https://github.com/user-attachments/assets/b3d523eb-ff09-407b-a719-0fca4f72205b)
-
 ## 📄 License
 
 [MIT License](LICENSE)
