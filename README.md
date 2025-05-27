@@ -42,13 +42,6 @@ A simple yet powerful desktop app that allows you to view and search all logs fr
 
 ![App Screenshot](https://github.com/user-attachments/assets/b3d523eb-ff09-407b-a719-0fca4f72205b)
 
-## 🧩 Coming Soon (Ideas)
-
-- Log level filters (Verbose, Debug, Info, Warning, Error).
-- Save logs to file.
-- Highlight keywords.
-- Customizable themes.
-
 ## 📄 License
 
 [MIT License](LICENSE)
