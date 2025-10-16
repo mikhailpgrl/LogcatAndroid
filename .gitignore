@@ -1,0 +1,13 @@
+# Xcode
+build/
+DerivedData/
+*.xcuserdata
+*.xccheckout
+*.xcscmblueprint
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+*.xcuserstate
+
