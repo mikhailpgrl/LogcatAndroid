@@ -1,3 +1,11 @@
+//
+//  DeviceSelectorView.swift
+//  LogCatAndroid
+//
+//  Created by Mikhail on 27/05/2025.
+//
+
+
 import SwiftUI
 
 struct DeviceSelectorView: View {
