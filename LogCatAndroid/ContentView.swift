@@ -11,159 +11,292 @@ struct ContentView: View {
     @StateObject private var adbManager = ADBManager()
 
     @State private var searchText: String = ""
-    @State private var autoScroll: Bool = true
+    @State private var selectedLevel: LogEntry.LogLevel? = nil
+    @State private var selectedEntry: LogEntry? = nil
 
-    var filteredLogs: [String] {
+    /// Filtered entries based on search text and log level, reversed so newest is first
+    var filteredEntries: [LogEntry] {
+        var entries = adbManager.logEntries
+
+        if let level = selectedLevel {
+            entries = entries.filter { $0.level == level }
+        }
+
         let keywords = searchText
             .split(whereSeparator: { $0.isWhitespace || $0 == "," })
             .map { String($0).lowercased() }
             .filter { !$0.isEmpty }
-        guard !keywords.isEmpty else { return adbManager.logLines }
 
-        return adbManager.logLines.filter { line in
-            let lowerLine = line.lowercased()
-            return keywords.allSatisfy { lowerLine.contains($0) }
+        if !keywords.isEmpty {
+            entries = entries.filter { entry in
+                let lowerLine = entry.rawLine.lowercased()
+                return keywords.allSatisfy { lowerLine.contains($0) }
+            }
         }
+
+        return entries.reversed()
     }
 
     var body: some View {
-        VStack(alignment: .leading) {
-            DeviceSelectorView(adbManager: adbManager)
-            
-            HStack {
-                Circle()
-                    .fill(adbManager.isLogcatRunning ? Color.green : Color.red)
-                    .frame(width: 12, height: 12)
-                Text(adbManager.isLogcatRunning ? "Logcat Running" : "Logcat Stopped")
-                    .foregroundColor(adbManager.isLogcatRunning ? .green : .red)
-                    .font(.caption)
-            }
-            .padding(.horizontal)
-            
-            // Search bar + toggle
-            HStack {
-                TextField("Search logs...", text: $searchText)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
-                    .padding(.horizontal)
+        NavigationSplitView {
+            VStack(spacing: 0) {
+                DeviceSelectorView(adbManager: adbManager)
 
-                Toggle("Auto Scroll", isOn: $autoScroll)
-                    .padding(.trailing)
-            }
-            .padding(.top)
-            
-            // Logs display
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(filteredLogs.enumerated()), id: \.offset) { index, line in
-                            highlightedText(for: line)
-                                .font(.system(.body, design: .monospaced))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                                .id(index)
+                Divider()
+
+                // Log level filter
+                Section {
+                    Picker("Log Level", selection: $selectedLevel) {
+                        Text("All Levels").tag(nil as LogEntry.LogLevel?)
+                        ForEach(LogEntry.LogLevel.allCases, id: \.self) { level in
+                            Label(level.displayName, systemImage: level.symbol)
+                                .tag(level as LogEntry.LogLevel?)
                         }
                     }
+                    .pickerStyle(.menu)
                     .padding(.horizontal)
-                    .padding(.bottom, 20)
                 }
-                .background(Color.black)
-                .onChange(of: filteredLogs.count) { _ in
-                    if autoScroll, let last = filteredLogs.indices.last {
-                        DispatchQueue.main.async {
-                            withAnimation {
-                                proxy.scrollTo(last, anchor: .bottom)
-                            }
-                        }
+
+                Divider()
+
+                // Controls
+                HStack(spacing: 12) {
+                    Button {
+                        adbManager.startLogcat()
+                    } label: {
+                        Label("Start", systemImage: "play.fill")
+                    }
+                    .disabled(adbManager.isLogcatRunning)
+
+                    Button {
+                        adbManager.stopLogcat()
+                    } label: {
+                        Label("Stop", systemImage: "stop.fill")
+                    }
+                    .disabled(!adbManager.isLogcatRunning)
+
+                    Button {
+                        adbManager.logLines.removeAll()
+                        adbManager.logEntries.removeAll()
+                    } label: {
+                        Label("Clear", systemImage: "trash")
                     }
                 }
-            }
-            
-            // Buttons
-            HStack {
-                Button("Start Logcat") {
-                    adbManager.startLogcat()
+                .glassButtons()
+                .padding()
+
+                // Status indicator
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(adbManager.isLogcatRunning ? Color.green : Color.red)
+                        .frame(width: 8, height: 8)
+                    Text(adbManager.isLogcatRunning ? "Running" : "Stopped")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(adbManager.logEntries.count) logs")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
-                Button("Stop Logcat") {
-                    adbManager.stopLogcat()
-                }
+                .padding(.horizontal)
+                .padding(.bottom, 8)
             }
-            .padding()
-            .padding(.leading, 10)
+            .navigationSplitViewColumnWidth(min: 260, ideal: 280, max: 350)
+        } content: {
+            List(filteredEntries, selection: $selectedEntry) { entry in
+                LogRowView(entry: entry)
+                    .tag(entry)
+            }
+            .listStyle(.inset)
+            .searchable(text: $searchText, prompt: "Filter logs...")
+            .navigationTitle("Logs")
+            .navigationSplitViewColumnWidth(min: 300, ideal: 400, max: 600)
+        } detail: {
+            if let entry = selectedEntry {
+                LogDetailView(entry: entry)
+            } else {
+                ContentUnavailableView(
+                    "Select a Log",
+                    systemImage: "doc.text.magnifyingglass",
+                    description: Text("Choose a log entry from the list to view its details.")
+                )
+            }
         }
         .onAppear {
             adbManager.refreshDevices()
         }
-        .frame(minWidth: 800, minHeight: 600)
+        .frame(minWidth: 900, minHeight: 600)
     }
-
-    func highlightedText(for line: String) -> Text {
-        let lowerLine = line.lowercased()
-        let keywords = searchText
-            .split(whereSeparator: { $0.isWhitespace || $0 == "," })
-            .map { String($0).lowercased() }
-            .filter { !$0.isEmpty }
-
-        guard !keywords.isEmpty else {
-            return Text(line).foregroundColor(.green)
-        }
-
-        // Find all matches
-        let matches = keywords
-            .flatMap { keyword in
-                lowerLine.ranges(of: keyword)
-            }
-            .sorted { $0.lowerBound < $1.lowerBound }
-
-        var result = Text("")
-        var currentIndex = line.startIndex
-        var matchIndex = 0
-
-        while currentIndex < line.endIndex {
-            if matchIndex < matches.count {
-                let matchRange = matches[matchIndex]
-
-                if currentIndex < matchRange.lowerBound {
-                    let nonMatchRange = currentIndex..<matchRange.lowerBound
-                    let nonMatchText = String(line[nonMatchRange])
-                    result = result + Text(nonMatchText).foregroundColor(.green)
-                    currentIndex = matchRange.lowerBound
-                } else {
-                    let matchText = String(line[matchRange])
-                    var attributed = AttributedString(matchText)
-                    attributed.foregroundColor = .white
-                    attributed.backgroundColor = .green
-                    // Uncomment to add underline
-                    // attributed.underlineStyle = .single
-
-                    result = result + Text(attributed)
-                    currentIndex = matchRange.upperBound
-                    matchIndex += 1
-                }
-            } else {
-                let remainingRange = currentIndex..<line.endIndex
-                let remainingText = String(line[remainingRange])
-                result = result + Text(remainingText).foregroundColor(.green)
-                break
-            }
-        }
-
-        return result
-    }
-
 }
 
-// MARK: - String Extension for Finding All Ranges
-extension String {
-    func ranges(of searchString: String) -> [Range<String.Index>] {
-        var ranges: [Range<String.Index>] = []
-        var searchStartIndex = self.startIndex
+// MARK: - Liquid Glass Availability Helpers
 
-        while searchStartIndex < self.endIndex,
-              let range = self.range(of: searchString, options: [.caseInsensitive], range: searchStartIndex..<self.endIndex) {
-            ranges.append(range)
-            searchStartIndex = range.upperBound
+extension View {
+    /// Applies `.buttonStyle(.glass)` on macOS 26+, plain style otherwise
+    @ViewBuilder
+    func glassButtons() -> some View {
+        if #available(macOS 26.0, *) {
+            self.buttonStyle(.glass)
+        } else {
+            self
         }
+    }
 
-        return ranges
+    /// Applies `.glassEffect(.regular, in:)` on macOS 26+, background fallback otherwise
+    @ViewBuilder
+    func glassCard(cornerRadius: CGFloat = 12) -> some View {
+        if #available(macOS 26.0, *) {
+            self.glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
+        } else {
+            self.background(.regularMaterial, in: .rect(cornerRadius: cornerRadius))
+        }
+    }
+}
+
+// MARK: - Log Row View
+
+struct LogRowView: View {
+    let entry: LogEntry
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: entry.level.symbol)
+                .foregroundStyle(colorForLevel(entry.level))
+                .font(.caption)
+                .frame(width: 16)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.eventName)
+                    .font(.system(.body, design: .monospaced, weight: .medium))
+                    .lineLimit(1)
+
+                Text(entry.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            if !entry.timestamp.isEmpty {
+                Text(entry.timestamp)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func colorForLevel(_ level: LogEntry.LogLevel) -> Color {
+        switch level {
+        case .verbose: return .gray
+        case .debug: return .blue
+        case .info: return .green
+        case .warning: return .orange
+        case .error: return .red
+        case .fatal: return .red
+        case .silent: return .gray
+        case .unknown: return .secondary
+        }
+    }
+}
+
+// MARK: - Log Detail View
+
+struct LogDetailView: View {
+    let entry: LogEntry
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                // Header
+                HStack {
+                    Image(systemName: entry.level.symbol)
+                        .font(.title2)
+                        .foregroundStyle(colorForLevel(entry.level))
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(entry.eventName)
+                            .font(.title2.weight(.semibold))
+                        Text(entry.level.displayName)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    if !entry.timestamp.isEmpty {
+                        Text(entry.timestamp)
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding()
+                .glassCard()
+
+                // Metadata
+                if !entry.pid.isEmpty {
+                    HStack(spacing: 16) {
+                        MetadataItem(label: "PID", value: entry.pid)
+                        MetadataItem(label: "TID", value: entry.tid)
+                        MetadataItem(label: "Tag", value: entry.tag)
+                    }
+                    .padding(.horizontal)
+                }
+
+                // Message content
+                GroupBox("Message") {
+                    Text(entry.message)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                }
+                .padding(.horizontal)
+
+                // Raw log line
+                GroupBox("Raw Log") {
+                    Text(entry.rawLine)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal)
+            }
+            .padding(.vertical)
+        }
+        .navigationTitle(entry.eventName)
+    }
+
+    private func colorForLevel(_ level: LogEntry.LogLevel) -> Color {
+        switch level {
+        case .verbose: return .gray
+        case .debug: return .blue
+        case .info: return .green
+        case .warning: return .orange
+        case .error: return .red
+        case .fatal: return .red
+        case .silent: return .gray
+        case .unknown: return .secondary
+        }
+    }
+}
+
+// MARK: - Metadata Item
+
+struct MetadataItem: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            Text(value)
+                .font(.system(.caption, design: .monospaced))
+        }
     }
 }

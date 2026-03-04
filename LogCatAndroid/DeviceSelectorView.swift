@@ -5,33 +5,35 @@
 //  Created by Mikhail on 27/05/2025.
 //
 
-
 import SwiftUI
 
 struct DeviceSelectorView: View {
     @ObservedObject var adbManager: ADBManager
 
     var body: some View {
-        VStack(alignment: .leading) {
-            Text("Connected Devices:")
-                .font(.headline)
+        VStack(alignment: .leading, spacing: 6) {
             if adbManager.connectedDevices.isEmpty {
                 Text("No devices connected")
-                    .foregroundColor(.secondary)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                Picker("Select device", selection: $adbManager.selectedDevice) {
+                Picker("Device", selection: $adbManager.selectedDevice) {
                     ForEach(adbManager.connectedDevices, id: \.self) { device in
                         Text(device).tag(device as String?)
                     }
                 }
                 .pickerStyle(.menu)
-                .frame(maxWidth: 300)
+                .labelsHidden()
             }
-            Button("Refresh Devices") {
+
+            Button {
                 adbManager.refreshDevices()
+            } label: {
+                Label("Refresh Devices", systemImage: "arrow.clockwise")
+                    .frame(maxWidth: .infinity)
             }
-            .padding(.top, 4)
+            .controlSize(.small)
         }
-        .padding()
     }
 }
