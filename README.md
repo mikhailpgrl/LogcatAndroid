@@ -1,6 +1,7 @@
 # Android Log Viewer via ADB
 
-<img width="932" alt="Capture d’écran 2025-05-27 à 15 48 10" src="https://github.com/user-attachments/assets/0ad5c2fd-d12f-435b-9f4d-01b4a19ed188" alt="drawing" width="200"/>
+<img width="1232" height="662" alt="Capture d’écran 2026-03-04 à 12 26 31" src="https://github.com/user-attachments/assets/2d6580a5-9f6e-4e00-a850-d83bdf25b2eb" />
+
 
 
 A simple yet powerful desktop app that allows you to view and search all logs from connected Android devices using ADB. Ideal for developers and testers who need real-time logging with flexible filtering and device management.
