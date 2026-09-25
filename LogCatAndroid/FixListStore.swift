@@ -31,6 +31,18 @@ struct FixItem: Identifiable, Codable, Hashable {
         rawLine = entry.rawLine
         createdAt = Date()
     }
+
+    /// Rebuilds the log entry from the stored raw line(s), for when the live entry
+    /// is no longer in the buffer (app restarted or buffer trimmed)
+    func reconstructedEntry() -> LogEntry {
+        let lines = rawLine.split(separator: "\n").map(String.init)
+        var entry = LogEntry.parse(line: lines.first ?? rawLine, index: 0)
+        // Merged duplicates were stored one raw line per tag
+        for line in lines.dropFirst() {
+            entry.merge(LogEntry.parse(line: line, index: 0))
+        }
+        return entry
+    }
 }
 
 /// The list of logs to fix, shown at the bottom of the sidebar and persisted across launches

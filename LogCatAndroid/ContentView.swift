@@ -17,10 +17,48 @@ struct ContentView: View {
     @State private var selectedEntryID: LogEntry.ID? = nil
     @State private var showSettings = false
 
+    /// Field path (e.g. `params.items[0].price`) briefly highlighted in the detail view after a reveal
+    @State private var highlightedFieldPath: String? = nil
+    /// Entry the log list should scroll to; reset once the scroll happened
+    @State private var scrollTargetID: LogEntry.ID? = nil
+
+    /// Entry revealed from the fix list, shown in the detail even when the list cannot select it
+    /// (gone from the buffer after a restart, or hidden by the current search/level filter)
+    @State private var detachedEntry: LogEntry? = nil
+
     /// The selected entry, looked up by id so tags merged after selection show up in the detail view
     private var selectedEntry: LogEntry? {
         guard let selectedEntryID else { return nil }
         return adbManager.logEntries.first { $0.id == selectedEntryID }
+    }
+
+    /// What the detail column shows: the list selection first, otherwise a revealed entry
+    private var detailEntry: LogEntry? { selectedEntry ?? detachedEntry }
+
+    /// Opens the log a fix item was taken from and flashes the flagged field for a second
+    private func reveal(_ item: FixItem) {
+        if let live = adbManager.logEntries.first(where: { $0.id == item.entryID }) {
+            selectedEntryID = live.id
+            scrollTargetID = live.id
+            // Also keep it as the detached entry in case the list filter hides the row
+            detachedEntry = live
+        } else {
+            // Gone from the buffer: rebuild it from the raw line stored with the item
+            selectedEntryID = nil
+            detachedEntry = item.reconstructedEntry()
+        }
+        withAnimation(.easeIn(duration: 0.15)) {
+            highlightedFieldPath = item.fieldKey
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1))
+            // Leave a newer reveal alone if one happened in the meantime
+            if highlightedFieldPath == item.fieldKey {
+                withAnimation(.easeOut(duration: 0.4)) {
+                    highlightedFieldPath = nil
+                }
+            }
+        }
     }
 
     /// Filtered entries based on search text and log level, reversed so newest is first
@@ -109,12 +147,7 @@ struct ContentView: View {
                 Spacer()
 
                 // Logs flagged for a fix, pinned to the bottom of the sidebar
-                FixListView(store: fixList) { item in
-                    // Reveal the log if it is still in this session's buffer
-                    if adbManager.logEntries.contains(where: { $0.id == item.entryID }) {
-                        selectedEntryID = item.entryID
-                    }
-                }
+                FixListView(store: fixList, onReveal: reveal)
 
                 // Settings button
                 Button {
@@ -164,13 +197,22 @@ struct ContentView: View {
                         }
                     }
                 }
+                .onChange(of: scrollTargetID) {
+                    // Bring a revealed fix-list entry into view, then reset so the same
+                    // entry can be revealed again later
+                    guard let scrollTargetID else { return }
+                    withAnimation {
+                        proxy.scrollTo(scrollTargetID, anchor: .center)
+                    }
+                    self.scrollTargetID = nil
+                }
             }
             .searchable(text: $searchText, prompt: "Filter logs...")
             .navigationTitle("Logs")
             .navigationSplitViewColumnWidth(min: 300, ideal: 400, max: 600)
         } detail: {
-            if let entry = selectedEntry {
-                LogDetailView(entry: entry, fixList: fixList)
+            if let entry = detailEntry {
+                LogDetailView(entry: entry, fixList: fixList, highlightedFieldPath: highlightedFieldPath)
             } else {
                 ContentUnavailableView(
                     "Select a Log",
@@ -181,6 +223,12 @@ struct ContentView: View {
         }
         .onAppear {
             adbManager.refreshDevices()
+        }
+        .onChange(of: selectedEntryID) {
+            // Picking another row in the list dismisses a revealed entry
+            if let selectedEntryID, selectedEntryID != detachedEntry?.id {
+                detachedEntry = nil
+            }
         }
         .sheet(isPresented: $showSettings) {
             SettingsView(themeManager: themeManager)
@@ -265,6 +313,8 @@ struct LogRowView: View {
 struct LogDetailView: View {
     let entry: LogEntry
     @ObservedObject var fixList: FixListStore
+    /// Field path to flash, set for a second when a fix-list item is revealed
+    var highlightedFieldPath: String? = nil
     @Environment(\.appTheme) private var theme
     @State private var showEventPopover = false
 
@@ -324,7 +374,8 @@ struct LogDetailView: View {
                 if !entry.parsedFields.isEmpty {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(entry.parsedFields.enumerated()), id: \.offset) { index, field in
-                            FieldRowView(field: field, path: field.key, onAddToFixList: addToFixList)
+                            FieldRowView(field: field, path: field.key, onAddToFixList: addToFixList,
+                                         highlightedPath: highlightedFieldPath)
 
                             if index < entry.parsedFields.count - 1 {
                                 Divider()
@@ -490,6 +541,8 @@ struct FieldRowView: View {
     var path: String
     /// Called with (path, value, note) when the user flags this field for a fix
     var onAddToFixList: (String, String, String) -> Void
+    /// Field path currently flashed after a reveal from the fix list
+    var highlightedPath: String? = nil
     @Environment(\.appTheme) private var theme
     @State private var showAddPopover = false
 
@@ -500,6 +553,27 @@ struct FieldRowView: View {
     private var isExpanded: Bool { userExpanded ?? (depth == 0) }
 
     private var keyWidth: CGFloat { max(100 - CGFloat(depth) * 16, 60) }
+
+    /// Whether this exact field is the one being flashed
+    private var isHighlighted: Bool { highlightedPath == path }
+
+    /// Whether the flashed field lives somewhere inside this container
+    private var containsHighlight: Bool {
+        guard let highlightedPath else { return false }
+        return highlightedPath.hasPrefix(path + ".") || highlightedPath.hasPrefix(path + "[")
+    }
+
+    /// Flash background, animated in and out by the caller's `withAnimation`
+    private var highlightBackground: Color {
+        isHighlighted ? theme.accent.opacity(0.3) : .clear
+    }
+
+    /// Opens this container when a reveal targets one of its descendants
+    private func expandIfNeededForHighlight() {
+        if containsHighlight && !isExpanded {
+            userExpanded = true
+        }
+    }
 
     var body: some View {
         if field.isNested {
@@ -539,15 +613,19 @@ struct FieldRowView: View {
                     .padding(.horizontal, 16 + CGFloat(depth) * 16)
                     .padding(.vertical, 8)
                     .contentShape(Rectangle())
+                    .background(highlightBackground)
                 }
                 .buttonStyle(.plain)
+                .onAppear(perform: expandIfNeededForHighlight)
+                .onChange(of: highlightedPath) { expandIfNeededForHighlight() }
 
                 if isExpanded {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(field.children.enumerated()), id: \.offset) { index, child in
                             // List elements already carry their `[n]` key; object children get a dot
                             let childPath = child.key.hasPrefix("[") ? path + child.key : path + "." + child.key
-                            FieldRowView(field: child, depth: depth + 1, path: childPath, onAddToFixList: onAddToFixList)
+                            FieldRowView(field: child, depth: depth + 1, path: childPath,
+                                         onAddToFixList: onAddToFixList, highlightedPath: highlightedPath)
 
                             if index < field.children.count - 1 {
                                 Divider()
@@ -576,6 +654,7 @@ struct FieldRowView: View {
             .padding(.horizontal, 16 + CGFloat(depth) * 16)
             .padding(.vertical, 8)
             .contentShape(Rectangle())
+            .background(highlightBackground)
             // Double-click (or right-click) anywhere on the row, value included, to flag it for a fix
             .onTapGesture(count: 2) { showAddPopover = true }
             .contextMenu {

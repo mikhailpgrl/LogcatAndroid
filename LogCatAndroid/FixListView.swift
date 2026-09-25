@@ -8,8 +8,8 @@ import SwiftUI
 /// Sidebar list of the logs flagged for a fix
 struct FixListView: View {
     @ObservedObject var store: FixListStore
-    /// Called when the user clicks an item, to reveal the matching log
-    let onSelect: (FixItem) -> Void
+    /// Called when the user asks to see an item's log, to open and highlight it
+    let onReveal: (FixItem) -> Void
     @Environment(\.appTheme) private var theme
 
     /// Briefly true after the list was copied, to confirm the action on the button
@@ -20,7 +20,7 @@ struct FixListView: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(store.slackExport(), forType: .string)
         justCopied = true
-        Task {
+        Task { @MainActor in
             try? await Task.sleep(for: .seconds(1.5))
             justCopied = false
         }
@@ -64,6 +64,8 @@ struct FixListView: View {
                     .buttonStyle(.plain)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    // Keep the destructive action clearly apart from the copy button
+                    .padding(.leading, 12)
                     .help("Remove every item from the list")
                 }
             }
@@ -79,7 +81,7 @@ struct FixListView: View {
                         ForEach(store.items) { item in
                             FixItemRow(
                                 item: item,
-                                onSelect: { onSelect(item) },
+                                onReveal: { onReveal(item) },
                                 onRemove: { store.remove(item) }
                             )
                         }
@@ -96,10 +98,11 @@ struct FixListView: View {
 /// One flagged log: event name, the field to change and the user's note
 struct FixItemRow: View {
     let item: FixItem
-    let onSelect: () -> Void
+    let onReveal: () -> Void
     let onRemove: () -> Void
     @Environment(\.appTheme) private var theme
     @State private var isHovering = false
+    @State private var showRemoveConfirmation = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -126,22 +129,39 @@ struct FixItemRow: View {
 
             Spacer(minLength: 0)
 
-            Button {
-                onRemove()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                Button {
+                    onReveal()
+                } label: {
+                    Image(systemName: "arrow.right.circle.fill")
+                        .foregroundStyle(theme.accent)
+                }
+                .buttonStyle(.plain)
+                .help("Show this log and highlight the field")
+
+                Button {
+                    showRemoveConfirmation = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Remove from list")
             }
-            .buttonStyle(.plain)
             .opacity(isHovering ? 1 : 0.4)
-            .help("Remove from list")
         }
         .padding(8)
         .background(theme.surface.opacity(isHovering ? 0.6 : 0.3))
         .clipShape(.rect(cornerRadius: 8))
         .contentShape(Rectangle())
-        .onTapGesture { onSelect() }
+        .onTapGesture { onReveal() }
         .onHover { isHovering = $0 }
+        .alert("Remove this log from the list?", isPresented: $showRemoveConfirmation) {
+            Button("Remove", role: .destructive) { onRemove() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\(item.eventName) · \(item.fieldKey)")
+        }
     }
 }
 
@@ -154,11 +174,11 @@ struct FixItemRow: View {
         FixItemRow(
             item: FixItem(entry: entry, fieldKey: "params.items[0].price", fieldValue: "19.99",
                           note: "Should be a string, not a number"),
-            onSelect: {}, onRemove: {}
+            onReveal: {}, onRemove: {}
         )
         FixItemRow(
             item: FixItem(entry: entry, fieldKey: "event", fieldValue: "add_to_cart", note: ""),
-            onSelect: {}, onRemove: {}
+            onReveal: {}, onRemove: {}
         )
     }
     .padding(12)
