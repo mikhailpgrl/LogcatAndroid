@@ -160,26 +160,16 @@ struct FixItemRow: View {
 
             Spacer(minLength: 0)
 
-            HStack(spacing: 4) {
-                Button {
-                    onReveal()
-                } label: {
-                    Image(systemName: "arrow.right.circle.fill")
-                        .foregroundStyle(theme.accent)
-                }
-                .buttonStyle(.plain)
-                .help("Show this log and highlight the field")
-
-                Button {
-                    showRemoveConfirmation = true
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Remove from list")
+            // Clicking the row itself reveals the log; only the remove action needs a button
+            Button {
+                showRemoveConfirmation = true
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
             }
+            .buttonStyle(.plain)
             .opacity(isHovering ? 1 : 0.4)
+            .help("Remove from list")
         }
         .padding(8)
         .background(isHighlighted ? theme.accent.opacity(0.3) : theme.surface.opacity(isHovering ? 0.6 : 0.3))
