@@ -18,6 +18,8 @@ struct FixListView: View {
     /// Item flashed for a second right after being added
     @State private var highlightedItemID: FixItem.ID? = nil
 
+    @State private var showClearConfirmation = false
+
     /// Scrolls to the newly added item and flashes it for a second
     private func flash(_ id: FixItem.ID, proxy: ScrollViewProxy) {
         withAnimation(.easeInOut(duration: 0.2)) {
@@ -79,7 +81,7 @@ struct FixListView: View {
                     .help("Copy the list to the clipboard, formatted for Slack")
 
                     Button("Clear", role: .destructive) {
-                        store.removeAll()
+                        showClearConfirmation = true
                     }
                     .buttonStyle(.plain)
                     .font(.caption)
@@ -87,6 +89,14 @@ struct FixListView: View {
                     // Keep the destructive action clearly apart from the copy button
                     .padding(.leading, 12)
                     .help("Remove every item from the list")
+                    .alert("Clear the whole list?", isPresented: $showClearConfirmation) {
+                        Button("Clear", role: .destructive) { store.removeAll() }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text(store.items.count == 1
+                             ? "1 item will be removed. This cannot be undone."
+                             : "\(store.items.count) items will be removed. This cannot be undone.")
+                    }
                 }
             }
 
