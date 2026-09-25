@@ -13,8 +13,14 @@ struct ContentView: View {
 
     @State private var searchText: String = ""
     @State private var selectedLevel: LogEntry.LogLevel? = nil
-    @State private var selectedEntry: LogEntry? = nil
+    @State private var selectedEntryID: LogEntry.ID? = nil
     @State private var showSettings = false
+
+    /// The selected entry, looked up by id so tags merged after selection show up in the detail view
+    private var selectedEntry: LogEntry? {
+        guard let selectedEntryID else { return nil }
+        return adbManager.logEntries.first { $0.id == selectedEntryID }
+    }
 
     /// Filtered entries based on search text and log level, reversed so newest is first
     var filteredEntries: [LogEntry] {
@@ -63,6 +69,7 @@ struct ContentView: View {
                     }
                     .pickerStyle(.menu)
                     .labelsHidden()
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 // Controls section
@@ -131,9 +138,9 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: 260, ideal: 280, max: 350)
         } content: {
             ScrollViewReader { proxy in
-                List(filteredEntries, selection: $selectedEntry) { entry in
+                List(filteredEntries, selection: $selectedEntryID) { entry in
                     LogRowView(entry: entry)
-                        .tag(entry)
+                        .tag(entry.id)
                         .id(entry.id)
                         .listRowBackground(themeManager.currentTheme.background)
                 }
@@ -142,7 +149,7 @@ struct ContentView: View {
                 .background(themeManager.currentTheme.background)
                 .onChange(of: adbManager.logEntries.count) {
                     // Auto-scroll to the newest entry (top) only when nothing is selected
-                    if selectedEntry == nil, let first = filteredEntries.first {
+                    if selectedEntryID == nil, let first = filteredEntries.first {
                         withAnimation {
                             proxy.scrollTo(first.id, anchor: .top)
                         }
@@ -214,10 +221,17 @@ struct LogRowView: View {
                 .frame(width: 16)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(entry.eventName)
-                    .font(.system(.body, design: .monospaced, weight: .medium))
-                    .foregroundStyle(theme.text)
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(entry.eventName)
+                        .font(.system(.body, design: .monospaced, weight: .medium))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(1)
+
+                    // One chip per logger tag this event was seen with
+                    ForEach(entry.tags, id: \.self) { tag in
+                        TagChip(tag: tag)
+                    }
+                }
 
                 Text(entry.message)
                     .font(.caption)
@@ -309,7 +323,8 @@ struct LogDetailView: View {
                     HStack(spacing: 12) {
                         MetadataChip(label: "PID", value: entry.pid)
                         MetadataChip(label: "TID", value: entry.tid)
-                        MetadataChip(label: "Tag", value: entry.tag)
+                        MetadataChip(label: entry.tags.count > 1 ? "Tags" : "Tag",
+                                     value: entry.tags.joined(separator: ", "))
                     }
                     .padding(.horizontal)
                 }
@@ -337,25 +352,37 @@ struct RawLogView: View {
 
     /// Every case-insensitive occurrence of `searchText` in the raw line
     private var matches: [Range<String.Index>] {
-        guard !searchText.isEmpty else { return [] }
+        Self.matches(of: searchText, in: rawLine)
+    }
+
+    /// The raw line with matches highlighted
+    private var highlightedText: AttributedString {
+        Self.highlighted(rawLine, matching: searchText)
+    }
+
+    /// Every case-insensitive, diacritic-insensitive occurrence of `query` in `text`
+    static func matches(of query: String, in text: String) -> [Range<String.Index>] {
+        guard !query.isEmpty else { return [] }
         var ranges: [Range<String.Index>] = []
-        var searchStart = rawLine.startIndex
-        while searchStart < rawLine.endIndex,
-              let range = rawLine.range(of: searchText,
-                                        options: [.caseInsensitive, .diacriticInsensitive],
-                                        range: searchStart..<rawLine.endIndex) {
+        var searchStart = text.startIndex
+        while searchStart < text.endIndex,
+              let range = text.range(of: query,
+                                     options: [.caseInsensitive, .diacriticInsensitive],
+                                     range: searchStart..<text.endIndex) {
             ranges.append(range)
             searchStart = range.upperBound
         }
         return ranges
     }
 
-    /// The raw line with matches highlighted
-    private var highlightedText: AttributedString {
-        var attributed = AttributedString(rawLine)
-        for range in matches {
+    /// `text` as an attributed string where every match of `query` is drawn
+    /// bold and black on a solid yellow background, so it stands out on any theme.
+    static func highlighted(_ text: String, matching query: String) -> AttributedString {
+        var attributed = AttributedString(text)
+        for range in matches(of: query, in: text) {
             guard let attributedRange = Range(range, in: attributed) else { continue }
-            attributed[attributedRange].backgroundColor = Color.yellow.opacity(0.35)
+            attributed[attributedRange].backgroundColor = .yellow
+            attributed[attributedRange].foregroundColor = .black
             attributed[attributedRange].font = .system(.body, design: .monospaced, weight: .bold)
         }
         return attributed
@@ -413,6 +440,16 @@ struct RawLogView: View {
             }
         }
     }
+}
+
+#Preview("Raw log highlight") {
+    Text(RawLogView.highlighted(
+        "09-25 11:11:44.394 19903 26403 D Analytics: event=add_to_cart params={item_name=Classic Pet Portrait, price=19.99}",
+        matching: "it"
+    ))
+    .font(.system(.body, design: .monospaced))
+    .padding()
+    .frame(width: 500)
 }
 
 // MARK: - Field Row View
@@ -521,6 +558,26 @@ struct SidebarSection<Content: View>: View {
 
             content
         }
+    }
+}
+
+// MARK: - Tag Chip
+
+/// Small capsule showing a logger tag in a list row
+struct TagChip: View {
+    let tag: String
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        Text(tag)
+            .font(.system(.caption2, design: .rounded, weight: .medium))
+            .foregroundStyle(theme.accent)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(theme.accent.opacity(0.12))
+            .clipShape(.capsule)
+            .lineLimit(1)
+            .fixedSize()
     }
 }
 

@@ -18,6 +18,8 @@ struct PackageSelectorView: View {
             }
             .pickerStyle(.menu)
             .labelsHidden()
+            // Flush left like the device picker above
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             if let package = adbManager.selectedPackage {
                 Text("\(package.packageName) (+ debug)")

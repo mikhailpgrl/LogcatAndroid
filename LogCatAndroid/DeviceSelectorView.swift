@@ -25,6 +25,8 @@ struct DeviceSelectorView: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
+                // Keep the popup flush left, in line with the other sidebar controls
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             Button {

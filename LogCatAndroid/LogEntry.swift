@@ -6,13 +6,19 @@ struct LogEntry: Identifiable, Equatable, Hashable {
     let pid: String
     let tid: String
     let level: LogLevel
-    let tag: String
+    /// The logger tags this event was emitted under. Several when the same event
+    /// was logged through multiple loggers (e.g. `Analytics` and `AnalyticsPostHog`).
+    private(set) var tags: [String]
     let message: String
-    let rawLine: String
+    /// The raw logcat line(s), one per merged tag
+    private(set) var rawLine: String
     let index: Int
 
     /// Parsed fields from the Kotlin data class toString() format
     let parsedFields: [ParsedField]
+
+    /// The primary tag (the first one this event was seen with)
+    var tag: String { tags.first ?? "" }
 
     /// The event name: uses the "event" field if available, otherwise the tag
     var eventName: String {
@@ -20,6 +26,26 @@ struct LogEntry: Identifiable, Equatable, Hashable {
             return eventField.value
         }
         return tag.isEmpty ? "Unknown" : tag
+    }
+
+    /// The `id` field of the payload, when the app logs one (PhotoPrint's `LogDomainModel(id=...)`)
+    var payloadId: String? {
+        parsedFields.first(where: { $0.key == "id" })?.value
+    }
+
+    /// Whether `other` is the same event as this one, emitted through a logger tag
+    /// not yet seen on this entry. Same content, same process and same payload id are required.
+    func isSameEvent(as other: LogEntry) -> Bool {
+        message == other.message
+            && pid == other.pid
+            && payloadId == other.payloadId
+            && !other.tags.contains(where: tags.contains)
+    }
+
+    /// Absorbs `other` (a duplicate under another tag) into this entry
+    mutating func merge(_ other: LogEntry) {
+        tags.append(contentsOf: other.tags.filter { !tags.contains($0) })
+        rawLine += "\n" + other.rawLine
     }
 
     struct ParsedField: Hashable, Identifiable {
@@ -133,7 +159,7 @@ struct LogEntry: Identifiable, Equatable, Hashable {
                     pid: components[1],
                     tid: components[2],
                     level: level,
-                    tag: components[4].trimmingCharacters(in: .whitespaces),
+                    tags: [components[4].trimmingCharacters(in: .whitespaces)],
                     message: msg,
                     rawLine: line,
                     index: index,
@@ -149,7 +175,7 @@ struct LogEntry: Identifiable, Equatable, Hashable {
             pid: "",
             tid: "",
             level: .unknown,
-            tag: "",
+            tags: [],
             message: line,
             rawLine: line,
             index: index,

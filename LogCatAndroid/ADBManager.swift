@@ -43,6 +43,9 @@ class ADBManager: ObservableObject {
     private let stateLock = NSLock()
     private var pidRefreshTimer: DispatchSourceTimer?
 
+    /// Whether logcat was already started automatically for a lone connected device
+    private var hasAutoStarted = false
+
     private static let selectedPackageKey = "selectedPackage"
 
     let adbPath: String = "/opt/homebrew/bin/adb"
@@ -235,12 +238,32 @@ class ADBManager: ObservableObject {
         guard !batch.isEmpty else { return }
 
         DispatchQueue.main.async {
-            self.logEntries.append(contentsOf: batch)
+            for entry in batch {
+                // The same event is often logged once per analytics backend, under a different
+                // tag each time: fold those duplicates into a single entry carrying every tag.
+                if let index = self.indexOfSameEvent(as: entry) {
+                    self.logEntries[index].merge(entry)
+                } else {
+                    self.logEntries.append(entry)
+                }
+            }
             // Limit buffer to last 5000 entries
             if self.logEntries.count > 5000 {
                 self.logEntries.removeFirst(self.logEntries.count - 5000)
             }
         }
+    }
+
+    /// Looks back through the most recent entries for the same event logged under another tag.
+    /// Duplicates are emitted back to back, so a short window is enough.
+    private func indexOfSameEvent(as entry: LogEntry) -> Int? {
+        let window = 50
+        let lowerBound = max(0, logEntries.count - window)
+        for index in stride(from: logEntries.count - 1, through: lowerBound, by: -1)
+        where logEntries[index].isSameEvent(as: entry) {
+            return index
+        }
+        return nil
     }
 
     // MARK: - Package Filtering
@@ -467,6 +490,13 @@ class ADBManager: ObservableObject {
                     // A device change already refreshes the PIDs through `selectedDevice`
                     if self.selectedDevice == previousDevice {
                         self.refreshPackagePids()
+                    }
+
+                    // With a single device there is nothing to choose: start streaming right away.
+                    // Only once, so a manual Stop is not undone by a later device refresh.
+                    if deviceIDs.count == 1, !self.hasAutoStarted, !self.isLogcatRunning {
+                        self.hasAutoStarted = true
+                        self.startLogcat()
                     }
                 }
             }
