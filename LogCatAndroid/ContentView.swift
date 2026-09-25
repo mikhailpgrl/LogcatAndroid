@@ -196,17 +196,50 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: 260, ideal: 280, max: 350)
         } content: {
             VStack(spacing: 0) {
-                TagFilterBar(tags: availableTags, selectedTags: $selectedTags)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(themeManager.currentTheme.background)
+                // Title, search + tag filters, pinned above the log list
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("Logs")
+                            .font(.title3.weight(.semibold))
+                        Spacer()
+                        Text("\(filteredEntries.count) / \(adbManager.logEntries.count)")
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .help("Shown / total")
+                    }
+
+                    HStack(spacing: 6) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                        TextField("Filter logs...", text: $searchText)
+                            .textFieldStyle(.plain)
+                        if !searchText.isEmpty {
+                            Button {
+                                searchText = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Clear search")
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(.background.secondary)
+                    .clipShape(.rect(cornerRadius: 8))
+
+                    TagFilterBar(tags: availableTags, selectedTags: $selectedTags)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(themeManager.currentTheme.background)
 
                 Divider()
 
                 logList
             }
-            .searchable(text: $searchText, prompt: "Filter logs...")
-            .navigationTitle("Logs")
             .navigationSplitViewColumnWidth(min: 300, ideal: 400, max: 600)
         } detail: {
             if let entry = detailEntry {
@@ -219,6 +252,18 @@ struct ContentView: View {
                 )
             }
         }
+        .toolbar {
+            // App icon and name at the left of the title bar. On macOS 26 toolbar items get a
+            // glass capsule behind them: hide it so they sit bare on the title bar.
+            if #available(macOS 26.0, *) {
+                ToolbarItem(placement: .navigation) { appIcon }
+                    .sharedBackgroundVisibility(.hidden)
+            } else {
+                ToolbarItem(placement: .navigation) { appIcon }
+            }
+        }
+        // No window title text: the icon + name plays that role
+        .toolbar(removing: .title)
         .onAppear {
             adbManager.refreshDevices()
         }
@@ -235,6 +280,19 @@ struct ContentView: View {
         .preferredColorScheme(themeManager.currentTheme.preferredScheme)
         .tint(themeManager.currentTheme.accent)
         .frame(minWidth: 900, minHeight: 600)
+    }
+
+    /// The running app's icon and name, shown in the title bar
+    private var appIcon: some View {
+        HStack(spacing: 6) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 24, height: 24)
+            Text("LogCat")
+                .font(.headline)
+        }
+        .help("LogCatAndroid")
     }
 
     /// The scrolling list of filtered log entries
