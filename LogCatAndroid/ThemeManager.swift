@@ -6,6 +6,7 @@ struct AppTheme: Identifiable, Hashable {
     let id: String
     let name: String
     let icon: String
+    let preferredScheme: ColorScheme?
     let background: Color
     let surface: Color
     let text: Color
@@ -35,6 +36,7 @@ struct AppTheme: Identifiable, Hashable {
 extension AppTheme {
     static let defaultLight = AppTheme(
         id: "default", name: "Default", icon: "circle.lefthalf.filled",
+        preferredScheme: nil,
         background: Color(.windowBackgroundColor),
         surface: Color(.controlBackgroundColor),
         text: .primary,
@@ -49,6 +51,7 @@ extension AppTheme {
 
     static let monokai = AppTheme(
         id: "monokai", name: "Monokai", icon: "paintpalette",
+        preferredScheme: .dark,
         background: Color(red: 0.16, green: 0.16, blue: 0.16),
         surface: Color(red: 0.20, green: 0.20, blue: 0.20),
         text: Color(red: 0.97, green: 0.97, blue: 0.94),
@@ -63,6 +66,7 @@ extension AppTheme {
 
     static let dracula = AppTheme(
         id: "dracula", name: "Dracula", icon: "moon.stars",
+        preferredScheme: .dark,
         background: Color(red: 0.16, green: 0.16, blue: 0.21),
         surface: Color(red: 0.21, green: 0.22, blue: 0.28),
         text: Color(red: 0.97, green: 0.97, blue: 0.95),
@@ -77,6 +81,7 @@ extension AppTheme {
 
     static let solarizedDark = AppTheme(
         id: "solarized", name: "Solarized", icon: "sun.max",
+        preferredScheme: .dark,
         background: Color(red: 0.00, green: 0.17, blue: 0.21),
         surface: Color(red: 0.03, green: 0.21, blue: 0.26),
         text: Color(red: 0.51, green: 0.58, blue: 0.59),
@@ -91,6 +96,7 @@ extension AppTheme {
 
     static let nord = AppTheme(
         id: "nord", name: "Nord", icon: "snowflake",
+        preferredScheme: .dark,
         background: Color(red: 0.18, green: 0.20, blue: 0.25),
         surface: Color(red: 0.23, green: 0.26, blue: 0.32),
         text: Color(red: 0.85, green: 0.87, blue: 0.91),
@@ -105,6 +111,7 @@ extension AppTheme {
 
     static let tokyoNight = AppTheme(
         id: "tokyo", name: "Tokyo Night", icon: "building.2",
+        preferredScheme: .dark,
         background: Color(red: 0.10, green: 0.11, blue: 0.18),
         surface: Color(red: 0.13, green: 0.15, blue: 0.23),
         text: Color(red: 0.66, green: 0.68, blue: 0.82),
@@ -119,6 +126,7 @@ extension AppTheme {
 
     static let catppuccinMocha = AppTheme(
         id: "catppuccin", name: "Catppuccin", icon: "cat",
+        preferredScheme: .dark,
         background: Color(red: 0.12, green: 0.12, blue: 0.18),
         surface: Color(red: 0.18, green: 0.19, blue: 0.26),
         text: Color(red: 0.80, green: 0.84, blue: 0.96),
@@ -133,6 +141,7 @@ extension AppTheme {
 
     static let githubDark = AppTheme(
         id: "github", name: "GitHub Dark", icon: "chevron.left.forwardslash.chevron.right",
+        preferredScheme: .dark,
         background: Color(red: 0.06, green: 0.07, blue: 0.09),
         surface: Color(red: 0.09, green: 0.11, blue: 0.13),
         text: Color(red: 0.90, green: 0.93, blue: 0.96),
