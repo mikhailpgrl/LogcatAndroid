@@ -14,6 +14,8 @@ struct ContentView: View {
 
     @State private var searchText: String = ""
     @State private var selectedLevel: LogEntry.LogLevel? = nil
+    /// Logger tags to show; empty means every tag
+    @State private var selectedTags: Set<String> = []
     @State private var selectedEntryID: LogEntry.ID? = nil
     @State private var showSettings = false
 
@@ -61,9 +63,23 @@ struct ContentView: View {
         }
     }
 
-    /// Filtered entries based on search text and log level, reversed so newest is first
+    /// Every logger tag seen in the current buffer, for the filter bar
+    var availableTags: [String] {
+        var seen: Set<String> = []
+        for entry in adbManager.logEntries {
+            seen.formUnion(entry.tags)
+        }
+        return seen.sorted()
+    }
+
+    /// Filtered entries based on tags, search text and log level, reversed so newest is first
     var filteredEntries: [LogEntry] {
         var entries = adbManager.logEntries
+
+        if !selectedTags.isEmpty {
+            // A merged entry carries several tags: keep it if any of them is selected
+            entries = entries.filter { entry in entry.tags.contains(where: selectedTags.contains) }
+        }
 
         if let level = selectedLevel {
             entries = entries.filter { $0.level == level }
@@ -179,33 +195,15 @@ struct ContentView: View {
             .background(themeManager.currentTheme.background)
             .navigationSplitViewColumnWidth(min: 260, ideal: 280, max: 350)
         } content: {
-            ScrollViewReader { proxy in
-                List(filteredEntries, selection: $selectedEntryID) { entry in
-                    LogRowView(entry: entry)
-                        .tag(entry.id)
-                        .id(entry.id)
-                        .listRowBackground(themeManager.currentTheme.background)
-                }
-                .listStyle(.inset)
-                .scrollContentBackground(.hidden)
-                .background(themeManager.currentTheme.background)
-                .onChange(of: adbManager.logEntries.count) {
-                    // Auto-scroll to the newest entry (top) only when nothing is selected
-                    if selectedEntryID == nil, let first = filteredEntries.first {
-                        withAnimation {
-                            proxy.scrollTo(first.id, anchor: .top)
-                        }
-                    }
-                }
-                .onChange(of: scrollTargetID) {
-                    // Bring a revealed fix-list entry into view, then reset so the same
-                    // entry can be revealed again later
-                    guard let scrollTargetID else { return }
-                    withAnimation {
-                        proxy.scrollTo(scrollTargetID, anchor: .center)
-                    }
-                    self.scrollTargetID = nil
-                }
+            VStack(spacing: 0) {
+                TagFilterBar(tags: availableTags, selectedTags: $selectedTags)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(themeManager.currentTheme.background)
+
+                Divider()
+
+                logList
             }
             .searchable(text: $searchText, prompt: "Filter logs...")
             .navigationTitle("Logs")
@@ -237,6 +235,109 @@ struct ContentView: View {
         .preferredColorScheme(themeManager.currentTheme.preferredScheme)
         .tint(themeManager.currentTheme.accent)
         .frame(minWidth: 900, minHeight: 600)
+    }
+
+    /// The scrolling list of filtered log entries
+    private var logList: some View {
+        ScrollViewReader { proxy in
+            List(filteredEntries, selection: $selectedEntryID) { entry in
+                LogRowView(entry: entry)
+                    .tag(entry.id)
+                    .id(entry.id)
+                    .listRowBackground(themeManager.currentTheme.background)
+            }
+            .listStyle(.inset)
+            .scrollContentBackground(.hidden)
+            .background(themeManager.currentTheme.background)
+            .onChange(of: adbManager.logEntries.count) {
+                // Auto-scroll to the newest entry (top) only when nothing is selected
+                if selectedEntryID == nil, let first = filteredEntries.first {
+                    withAnimation {
+                        proxy.scrollTo(first.id, anchor: .top)
+                    }
+                }
+            }
+            .onChange(of: scrollTargetID) {
+                // Bring a revealed fix-list entry into view, then reset so the same
+                // entry can be revealed again later
+                guard let scrollTargetID else { return }
+                withAnimation {
+                    proxy.scrollTo(scrollTargetID, anchor: .center)
+                }
+                self.scrollTargetID = nil
+            }
+        }
+    }
+}
+
+// MARK: - Tag Filter Bar
+
+/// Row of toggleable chips, one per logger tag seen so far, shown above the log list
+struct TagFilterBar: View {
+    let tags: [String]
+    @Binding var selectedTags: Set<String>
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                FilterChip(title: "All", isSelected: selectedTags.isEmpty) {
+                    selectedTags.removeAll()
+                }
+
+                ForEach(tags, id: \.self) { tag in
+                    FilterChip(title: tag, isSelected: selectedTags.contains(tag)) {
+                        if selectedTags.contains(tag) {
+                            selectedTags.remove(tag)
+                        } else {
+                            selectedTags.insert(tag)
+                        }
+                    }
+                }
+
+                if tags.isEmpty {
+                    Text("Tags appear here as logs come in")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        // Drop selections for tags that vanished from the buffer (e.g. after Clear All Logs)
+        .onChange(of: tags) {
+            selectedTags = selectedTags.filter(tags.contains)
+        }
+    }
+}
+
+#Preview("Tag filter bar") {
+    @Previewable @State var selected: Set<String> = ["AnalyticsPostHog"]
+    TagFilterBar(tags: ["Analytics", "AnalyticsPostHog", "Firebase"], selectedTags: $selected)
+        .padding(12)
+        .frame(width: 400)
+}
+
+/// A capsule toggle used by the tag filter bar
+struct FilterChip: View {
+    let title: String
+    let isSelected: Bool
+    let action: () -> Void
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(.caption, design: .rounded, weight: .medium))
+                .foregroundStyle(isSelected ? Color.white : theme.textSecondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(isSelected ? theme.accent : theme.surface.opacity(0.5))
+                .clipShape(.capsule)
+                .overlay {
+                    Capsule().strokeBorder(theme.accent.opacity(isSelected ? 0 : 0.3), lineWidth: 1)
+                }
+        }
+        .buttonStyle(.plain)
+        .animation(.easeInOut(duration: 0.12), value: isSelected)
     }
 }
 
