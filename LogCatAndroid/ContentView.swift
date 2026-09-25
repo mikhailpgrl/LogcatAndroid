@@ -10,6 +10,7 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var adbManager = ADBManager()
     @StateObject private var themeManager = ThemeManager()
+    @StateObject private var fixList = FixListStore()
 
     @State private var searchText: String = ""
     @State private var selectedLevel: LogEntry.LogLevel? = nil
@@ -107,6 +108,14 @@ struct ContentView: View {
 
                 Spacer()
 
+                // Logs flagged for a fix, pinned to the bottom of the sidebar
+                FixListView(store: fixList) { item in
+                    // Reveal the log if it is still in this session's buffer
+                    if adbManager.logEntries.contains(where: { $0.id == item.entryID }) {
+                        selectedEntryID = item.entryID
+                    }
+                }
+
                 // Settings button
                 Button {
                     showSettings.toggle()
@@ -161,7 +170,7 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: 300, ideal: 400, max: 600)
         } detail: {
             if let entry = selectedEntry {
-                LogDetailView(entry: entry)
+                LogDetailView(entry: entry, fixList: fixList)
             } else {
                 ContentUnavailableView(
                     "Select a Log",
@@ -255,7 +264,14 @@ struct LogRowView: View {
 
 struct LogDetailView: View {
     let entry: LogEntry
+    @ObservedObject var fixList: FixListStore
     @Environment(\.appTheme) private var theme
+    @State private var showEventPopover = false
+
+    /// Records a field of this entry in the fix list together with the user's note
+    private func addToFixList(key: String, value: String, note: String) {
+        fixList.add(FixItem(entry: entry, fieldKey: key, fieldValue: value, note: note))
+    }
 
     var body: some View {
         ScrollView {
@@ -270,6 +286,19 @@ struct LogDetailView: View {
                         Text(entry.eventName)
                             .font(.title2.weight(.semibold))
                             .foregroundStyle(theme.text)
+                            .contentShape(Rectangle())
+                            // Double-click (or right-click) the event name to flag this log
+                            .onTapGesture(count: 2) { showEventPopover = true }
+                            .contextMenu {
+                                Button("Add to Fix List…", systemImage: "wrench.and.screwdriver") {
+                                    showEventPopover = true
+                                }
+                            }
+                            .popover(isPresented: $showEventPopover, arrowEdge: .bottom) {
+                                AddToFixListPopover(fieldKey: "event", fieldValue: entry.eventName) { note in
+                                    addToFixList(key: "event", value: entry.eventName, note: note)
+                                }
+                            }
                         HStack(spacing: 8) {
                             Text(entry.level.displayName)
                                 .font(.caption.weight(.medium))
@@ -295,7 +324,7 @@ struct LogDetailView: View {
                 if !entry.parsedFields.isEmpty {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(entry.parsedFields.enumerated()), id: \.offset) { index, field in
-                            FieldRowView(field: field)
+                            FieldRowView(field: field, path: field.key, onAddToFixList: addToFixList)
 
                             if index < entry.parsedFields.count - 1 {
                                 Divider()
@@ -457,7 +486,12 @@ struct RawLogView: View {
 struct FieldRowView: View {
     let field: LogEntry.ParsedField
     var depth: Int = 0
+    /// Dotted path from the root, e.g. `params.items[0].item_name`, recorded in the fix list
+    var path: String
+    /// Called with (path, value, note) when the user flags this field for a fix
+    var onAddToFixList: (String, String, String) -> Void
     @Environment(\.appTheme) private var theme
+    @State private var showAddPopover = false
 
     /// User toggle state; `nil` until the user interacts, so the default below applies
     @State private var userExpanded: Bool? = nil
@@ -511,7 +545,9 @@ struct FieldRowView: View {
                 if isExpanded {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(field.children.enumerated()), id: \.offset) { index, child in
-                            FieldRowView(field: child, depth: depth + 1)
+                            // List elements already carry their `[n]` key; object children get a dot
+                            let childPath = child.key.hasPrefix("[") ? path + child.key : path + "." + child.key
+                            FieldRowView(field: child, depth: depth + 1, path: childPath, onAddToFixList: onAddToFixList)
 
                             if index < field.children.count - 1 {
                                 Divider()
@@ -530,14 +566,32 @@ struct FieldRowView: View {
                     .foregroundStyle(theme.textSecondary)
                     .frame(width: keyWidth, alignment: .trailing)
 
+                // Not selectable on purpose: text selection would swallow the double-click.
+                // The value can be copied from the context menu instead.
                 Text(field.value)
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(theme.text)
-                    .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.horizontal, 16 + CGFloat(depth) * 16)
             .padding(.vertical, 8)
+            .contentShape(Rectangle())
+            // Double-click (or right-click) anywhere on the row, value included, to flag it for a fix
+            .onTapGesture(count: 2) { showAddPopover = true }
+            .contextMenu {
+                Button("Add to Fix List…", systemImage: "wrench.and.screwdriver") {
+                    showAddPopover = true
+                }
+                Button("Copy Value", systemImage: "doc.on.doc") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(field.value, forType: .string)
+                }
+            }
+            .popover(isPresented: $showAddPopover, arrowEdge: .trailing) {
+                AddToFixListPopover(fieldKey: path, fieldValue: field.value) { note in
+                    onAddToFixList(path, field.value, note)
+                }
+            }
         }
     }
 }
