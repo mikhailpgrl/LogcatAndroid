@@ -51,14 +51,19 @@ final class FixListStore: ObservableObject {
         didSet { save() }
     }
 
+    /// The item most recently added in this session, so the list can flash it
+    @Published private(set) var lastAddedID: FixItem.ID? = nil
+
     private static let storageKey = "fixList"
 
     init() {
         load()
     }
 
+    /// Adds an item at the top of the list (newest first)
     func add(_ item: FixItem) {
-        items.append(item)
+        items.insert(item, at: 0)
+        lastAddedID = item.id
     }
 
     func remove(_ item: FixItem) {
@@ -83,10 +88,11 @@ final class FixListStore: ObservableObject {
         lines.append("*Analytics logs to fix* (\(items.count))")
         lines.append("")
 
-        // Group by event, keeping the order in which events were first flagged
+        // Group by event in the order events were first flagged. The list is stored
+        // newest first, so walk it backwards to get chronological order.
         var eventOrder: [String] = []
         var itemsByEvent: [String: [FixItem]] = [:]
-        for item in items {
+        for item in items.reversed() {
             if itemsByEvent[item.eventName] == nil {
                 eventOrder.append(item.eventName)
             }

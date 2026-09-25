@@ -15,6 +15,26 @@ struct FixListView: View {
     /// Briefly true after the list was copied, to confirm the action on the button
     @State private var justCopied = false
 
+    /// Item flashed for a second right after being added
+    @State private var highlightedItemID: FixItem.ID? = nil
+
+    /// Scrolls to the newly added item and flashes it for a second
+    private func flash(_ id: FixItem.ID, proxy: ScrollViewProxy) {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            proxy.scrollTo(id, anchor: .top)
+            highlightedItemID = id
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1))
+            // Leave a newer flash alone if another item was added meanwhile
+            if highlightedItemID == id {
+                withAnimation(.easeOut(duration: 0.4)) {
+                    highlightedItemID = nil
+                }
+            }
+        }
+    }
+
     /// Puts the Slack-formatted list on the clipboard and shows a short confirmation
     private func copyForSlack() {
         NSPasteboard.general.clearContents()
@@ -76,18 +96,27 @@ struct FixListView: View {
                     .foregroundStyle(.tertiary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                ScrollView {
-                    VStack(spacing: 4) {
-                        ForEach(store.items) { item in
-                            FixItemRow(
-                                item: item,
-                                onReveal: { onReveal(item) },
-                                onRemove: { store.remove(item) }
-                            )
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(spacing: 4) {
+                            ForEach(store.items) { item in
+                                FixItemRow(
+                                    item: item,
+                                    isHighlighted: highlightedItemID == item.id,
+                                    onReveal: { onReveal(item) },
+                                    onRemove: { store.remove(item) }
+                                )
+                                .id(item.id)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 220)
+                    .onChange(of: store.lastAddedID) {
+                        if let id = store.lastAddedID {
+                            flash(id, proxy: proxy)
                         }
                     }
                 }
-                .frame(maxHeight: 220)
             }
         }
     }
@@ -98,6 +127,8 @@ struct FixListView: View {
 /// One flagged log: event name, the field to change and the user's note
 struct FixItemRow: View {
     let item: FixItem
+    /// Flashed right after being added to the list
+    var isHighlighted: Bool = false
     let onReveal: () -> Void
     let onRemove: () -> Void
     @Environment(\.appTheme) private var theme
@@ -151,7 +182,7 @@ struct FixItemRow: View {
             .opacity(isHovering ? 1 : 0.4)
         }
         .padding(8)
-        .background(theme.surface.opacity(isHovering ? 0.6 : 0.3))
+        .background(isHighlighted ? theme.accent.opacity(0.3) : theme.surface.opacity(isHovering ? 0.6 : 0.3))
         .clipShape(.rect(cornerRadius: 8))
         .contentShape(Rectangle())
         .onTapGesture { onReveal() }
