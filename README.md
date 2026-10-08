@@ -25,7 +25,7 @@ A simple yet powerful desktop app that allows you to view and search the analyti
    - Android: [Android Debug Bridge (ADB)](https://developer.android.com/tools/adb), e.g. `brew install --cask android-platform-tools`
    - iOS: [libimobiledevice](https://libimobiledevice.org), `brew install libimobiledevice`
 
-   The tools are looked up in `/opt/homebrew/bin` and `/usr/local/bin` (and Android Studio's SDK for adb). The sidebar tells you which one is missing.
+   The setup screen shown at launch checks them and installs the missing ones through Homebrew (it is also in Settings). The tools are looked up in `/opt/homebrew/bin` and `/usr/local/bin` (and Android Studio's SDK for adb).
 
 2. **Connect Your Device**  
    - Android: enable developer mode and USB debugging, then connect it via USB.

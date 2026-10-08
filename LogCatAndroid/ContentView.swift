@@ -18,6 +18,10 @@ struct ContentView: View {
     @State private var selectedTags: Set<String> = []
     @State private var selectedEntryID: LogEntry.ID? = nil
     @State private var showSettings = false
+    @State private var showOnboarding = false
+    /// Set when Settings asks for the setup screen: it opens once the settings sheet is gone
+    @State private var showOnboardingAfterSettings = false
+    @AppStorage("hasSeenOnboarding") private var hasSeenOnboarding = false
 
     /// Field path (e.g. `params.items[0].price`) briefly highlighted in the detail view after a reveal
     @State private var highlightedFieldPath: String? = nil
@@ -96,7 +100,7 @@ struct ContentView: View {
             VStack(spacing: 16) {
                 // Device section
                 SidebarSection(title: "Device", icon: "cable.connector") {
-                    DeviceSelectorView(adbManager: adbManager)
+                    DeviceSelectorView(adbManager: adbManager) { showOnboarding = true }
                 }
 
                 // App package section
@@ -259,6 +263,9 @@ struct ContentView: View {
         .toolbar(removing: .title)
         .onAppear {
             adbManager.refreshDevices()
+            if !hasSeenOnboarding || !ToolSetup.allToolsInstalled {
+                showOnboarding = true
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             // The stream runs in a child process that would outlive the app otherwise.
@@ -271,8 +278,23 @@ struct ContentView: View {
                 detachedEntry = nil
             }
         }
-        .sheet(isPresented: $showSettings) {
-            SettingsView(themeManager: themeManager)
+        .sheet(isPresented: $showSettings, onDismiss: {
+            if showOnboardingAfterSettings {
+                showOnboardingAfterSettings = false
+                showOnboarding = true
+            }
+        }) {
+            SettingsView(themeManager: themeManager) {
+                showOnboardingAfterSettings = true
+                showSettings = false
+            }
+        }
+        .sheet(isPresented: $showOnboarding, onDismiss: {
+            hasSeenOnboarding = true
+            // Newly installed tools can list their devices now
+            adbManager.refreshDevices()
+        }) {
+            OnboardingView()
         }
         .environment(\.appTheme, themeManager.currentTheme)
         .preferredColorScheme(themeManager.currentTheme.preferredScheme)

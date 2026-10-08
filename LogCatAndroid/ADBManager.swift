@@ -22,8 +22,8 @@ class ADBManager: ObservableObject {
         }
     }
 
-    /// One `Platform: install command` hint per platform whose command-line tools are missing
-    @Published var missingTools: [String] = []
+    /// The platforms whose command-line tools are not installed, so their devices cannot be listed
+    @Published private(set) var platformsMissingTools: [DevicePlatform] = []
 
     /// The app package whose logs are displayed. `nil` means "all apps" (no package filtering).
     @Published var selectedPackage: AppPackage? {
@@ -476,27 +476,27 @@ class ADBManager: ObservableObject {
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var devices: [Device] = []
-            var missingTools: [String] = []
+            var platformsMissingTools: [DevicePlatform] = []
             for bridge in bridges {
                 if bridge.isAvailable {
                     devices += bridge.listDevices()
                 } else {
-                    missingTools.append("\(bridge.platform.displayName): \(bridge.installCommand)")
+                    platformsMissingTools.append(bridge.platform)
                 }
             }
 
             DispatchQueue.main.async {
-                self?.applyDevices(devices, missingTools: missingTools)
+                self?.applyDevices(devices, platformsMissingTools: platformsMissingTools)
             }
         }
     }
 
     /// Publishes a fresh device list, keeping the current selection while it is still connected
-    private func applyDevices(_ devices: [Device], missingTools: [String]) {
+    private func applyDevices(_ devices: [Device], platformsMissingTools: [DevicePlatform]) {
         let previousDevice = selectedDevice
         connectedDevices = devices
-        if self.missingTools != missingTools {
-            self.missingTools = missingTools
+        if self.platformsMissingTools != platformsMissingTools {
+            self.platformsMissingTools = platformsMissingTools
         }
 
         // Re-select the refreshed instance so the picker shows its current name

@@ -9,6 +9,8 @@ import SwiftUI
 
 struct DeviceSelectorView: View {
     @ObservedObject var adbManager: ADBManager
+    /// Opens the setup screen, offered when a platform's tools are missing
+    var onSetUpTools: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -30,13 +32,15 @@ struct DeviceSelectorView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            // Platforms that cannot be listed, with what to install
-            ForEach(adbManager.missingTools, id: \.self) { hint in
-                Text(hint)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            if !adbManager.platformsMissingTools.isEmpty {
+                Button(action: onSetUpTools) {
+                    Label(missingToolsText, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.orange)
+                .help("Open the setup screen to install them")
             }
 
             Button {
@@ -47,5 +51,11 @@ struct DeviceSelectorView: View {
             }
             .controlSize(.small)
         }
+    }
+
+    /// e.g. "Android tools missing — Set Up…"
+    private var missingToolsText: String {
+        let platforms = adbManager.platformsMissingTools.map(\.displayName).joined(separator: " & ")
+        return "\(platforms) tools missing — Set Up…"
     }
 }
