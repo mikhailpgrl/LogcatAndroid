@@ -19,14 +19,24 @@ struct DeviceSelectorView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 Picker("Device", selection: $adbManager.selectedDevice) {
-                    ForEach(adbManager.connectedDevices, id: \.self) { device in
-                        Text(device).tag(device as String?)
+                    ForEach(adbManager.connectedDevices) { device in
+                        Label(device.displayName, systemImage: device.platform.symbol)
+                            .tag(device as Device?)
                     }
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
                 // Keep the popup flush left, in line with the other sidebar controls
                 .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            // Platforms that cannot be listed, with what to install
+            ForEach(adbManager.missingTools, id: \.self) { hint in
+                Text(hint)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             Button {

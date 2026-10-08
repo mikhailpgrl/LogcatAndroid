@@ -63,15 +63,6 @@ struct ContentView: View {
         }
     }
 
-    /// Every logger tag seen in the current buffer, for the filter bar
-    var availableTags: [String] {
-        var seen: Set<String> = []
-        for entry in adbManager.logEntries {
-            seen.formUnion(entry.tags)
-        }
-        return seen.sorted()
-    }
-
     /// Filtered entries based on tags, search text and log level, reversed so newest is first
     var filteredEntries: [LogEntry] {
         var entries = adbManager.logEntries
@@ -137,7 +128,7 @@ struct ContentView: View {
                                 Label("Start", systemImage: "play.fill")
                                     .frame(maxWidth: .infinity)
                             }
-                            .disabled(adbManager.isLogcatRunning)
+                            .disabled(adbManager.isLogcatRunning || adbManager.selectedDevice == nil)
 
                             Button {
                                 adbManager.stopLogcat()
@@ -195,6 +186,8 @@ struct ContentView: View {
             .background(themeManager.currentTheme.background)
             .navigationSplitViewColumnWidth(min: 260, ideal: 280, max: 350)
         } content: {
+            // Filtering walks the whole buffer: do it once per update
+            let entries = filteredEntries
             VStack(spacing: 0) {
                 // Title, search + tag filters, pinned above the log list
                 VStack(alignment: .leading, spacing: 8) {
@@ -202,7 +195,7 @@ struct ContentView: View {
                         Text("Logs")
                             .font(.title3.weight(.semibold))
                         Spacer()
-                        Text("\(filteredEntries.count) / \(adbManager.logEntries.count)")
+                        Text("\(entries.count) / \(adbManager.logEntries.count)")
                             .font(.caption)
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
@@ -230,7 +223,7 @@ struct ContentView: View {
                     .background(.background.secondary)
                     .clipShape(.rect(cornerRadius: 8))
 
-                    TagFilterBar(tags: availableTags, selectedTags: $selectedTags)
+                    TagFilterBar(tags: adbManager.seenTags, selectedTags: $selectedTags)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -238,7 +231,7 @@ struct ContentView: View {
 
                 Divider()
 
-                logList
+                logList(entries)
             }
             .navigationSplitViewColumnWidth(min: 300, ideal: 400, max: 600)
         } detail: {
@@ -266,6 +259,11 @@ struct ContentView: View {
         .toolbar(removing: .title)
         .onAppear {
             adbManager.refreshDevices()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            // The stream runs in a child process that would outlive the app otherwise.
+            // A filtered iOS stream writes rarely, so it would not die of a broken pipe soon.
+            adbManager.stopLogcat()
         }
         .onChange(of: selectedEntryID) {
             // Picking another row in the list dismisses a revealed entry
@@ -295,36 +293,10 @@ struct ContentView: View {
         .help("LogCatAndroid")
     }
 
-    /// The scrolling list of filtered log entries
-    private var logList: some View {
-        ScrollViewReader { proxy in
-            List(filteredEntries, selection: $selectedEntryID) { entry in
-                LogRowView(entry: entry)
-                    .tag(entry.id)
-                    .id(entry.id)
-                    .listRowBackground(themeManager.currentTheme.background)
-            }
-            .listStyle(.inset)
-            .scrollContentBackground(.hidden)
+    /// The scrolling list of filtered log entries, newest first
+    private func logList(_ entries: [LogEntry]) -> some View {
+        LogTableView(entries: entries, selection: $selectedEntryID, scrollTarget: $scrollTargetID)
             .background(themeManager.currentTheme.background)
-            .onChange(of: adbManager.logEntries.count) {
-                // Auto-scroll to the newest entry (top) only when nothing is selected
-                if selectedEntryID == nil, let first = filteredEntries.first {
-                    withAnimation {
-                        proxy.scrollTo(first.id, anchor: .top)
-                    }
-                }
-            }
-            .onChange(of: scrollTargetID) {
-                // Bring a revealed fix-list entry into view, then reset so the same
-                // entry can be revealed again later
-                guard let scrollTargetID else { return }
-                withAnimation {
-                    proxy.scrollTo(scrollTargetID, anchor: .center)
-                }
-                self.scrollTargetID = nil
-            }
-        }
     }
 }
 

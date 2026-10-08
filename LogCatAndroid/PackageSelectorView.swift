@@ -21,8 +21,17 @@ struct PackageSelectorView: View {
             // Flush left like the device picker above
             .frame(maxWidth: .infinity, alignment: .leading)
 
+            Picker("Capture", selection: $adbManager.captureMode) {
+                ForEach(CaptureMode.allCases) { mode in
+                    Text(mode.displayName).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.small)
+
             if let package = adbManager.selectedPackage {
-                Text("\(package.packageName) (+ debug)")
+                Text(package.identifierSummary(for: adbManager.selectedDevice?.platform ?? .android))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
