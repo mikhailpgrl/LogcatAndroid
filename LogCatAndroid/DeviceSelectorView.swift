@@ -19,14 +19,30 @@ struct DeviceSelectorView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 Picker("Device", selection: $adbManager.selectedDevice) {
-                    ForEach(adbManager.connectedDevices, id: \.self) { device in
-                        Text(device).tag(device as String?)
+                    ForEach(adbManager.connectedDevices) { device in
+                        Label(device.name, systemImage: device.platform.symbol)
+                            .tag(device.id as String?)
                     }
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
                 // Keep the popup flush left, in line with the other sidebar controls
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+                if let device = adbManager.selectedDeviceInfo {
+                    Label(device.platform.displayName, systemImage: device.platform.symbol)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .help(device.id)
+                }
+            }
+
+            if let message = adbManager.toolMessage {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Button {

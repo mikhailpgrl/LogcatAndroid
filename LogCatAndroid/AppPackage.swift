@@ -39,7 +39,17 @@ enum AppPackage: String, CaseIterable, Identifiable {
     /// The process names this app can run under, one per package identifier
     var processNames: [String] { packageNames }
 
-    /// Whether a raw logcat line is one of the analytics logs this app emits
+    /// The iOS process names (the app's `CFBundleExecutable`) passed to `idevicesyslog -p`.
+    /// PLACEHOLDERS: adjust them to the real executable names of the iOS apps
+    /// (visible in Xcode > target > Build Settings > Product Name, or in any syslog line).
+    var iosProcessNames: [String] {
+        switch self {
+        case .photoPrint: return ["PhotoPrint"]
+        case .pictadroid: return ["Pictarine"]
+        }
+    }
+
+    /// Whether a raw logcat (Android) or idevicesyslog (iOS) line is one of the analytics logs this app emits
     func matches(line: String) -> Bool {
         switch self {
         case .photoPrint:

@@ -3,13 +3,42 @@ import Foundation
 class ADBManager: ObservableObject {
     @Published var logEntries: [LogEntry] = []
     @Published var isLogcatRunning = false
-    @Published var connectedDevices: [String] = []
+    /// Android (adb) and iOS (libimobiledevice) devices currently plugged in
+    @Published var connectedDevices: [Device] = []
 
+    /// The `Device.id` (adb serial or iOS UDID) of the device logs are streamed from
     @Published var selectedDevice: String? = nil {
         didSet {
             guard oldValue != selectedDevice else { return }
-            refreshPackagePids()
+            toolMessage = nil
+            if isLogcatRunning {
+                // The running stream targets the previous device (possibly another platform)
+                stopLogcat()
+                clearLogs()
+                startLogcat()
+            } else {
+                refreshPackagePids()
+            }
         }
+    }
+
+    /// User-facing problem with the command line tools of the selected platform
+    /// (e.g. libimobiledevice not installed), shown under the device picker
+    @Published var toolMessage: String? = nil
+
+    /// The selected device's full description
+    var selectedDeviceInfo: Device? {
+        connectedDevices.first { $0.id == selectedDevice }
+    }
+
+    /// Platform of the selected device; Android when nothing is selected (historical behaviour)
+    var selectedPlatform: Device.Platform {
+        selectedDeviceInfo?.platform ?? .android
+    }
+
+    /// Serial of the selected device when it is an Android one, for adb-only features (Build & Run)
+    var selectedAndroidSerial: String? {
+        selectedPlatform == .android ? selectedDevice : nil
     }
 
     /// The app package whose logs are displayed. `nil` means "all apps" (no package filtering).
@@ -33,6 +62,8 @@ class ADBManager: ObservableObject {
     private struct FilterState {
         var package: AppPackage?
         var device: String?
+        /// iOS devices are filtered by process name by idevicesyslog itself: no PID resolution
+        var isIOS = false
         /// `nil` means no PID filtering; an empty set means "the app is not running"
         var pids: Set<String>?
         /// Bumped on every start/stop so a stale reader thread stops publishing entries
@@ -49,6 +80,14 @@ class ADBManager: ObservableObject {
     private static let selectedPackageKey = "selectedPackage"
 
     let adbPath: String = "/opt/homebrew/bin/adb"
+
+    /// libimobiledevice tools (`brew install libimobiledevice`)
+    let ideviceIdPath: String = "/opt/homebrew/bin/idevice_id"
+    let ideviceInfoPath: String = "/opt/homebrew/bin/ideviceinfo"
+    let ideviceSyslogPath: String = "/opt/homebrew/bin/idevicesyslog"
+
+    /// Whether the missing libimobiledevice tools were already reported, to log it only once
+    private var hasReportedMissingIOSTools = false
 
     init() {
         let stored = UserDefaults.standard.string(forKey: Self.selectedPackageKey)
@@ -75,10 +114,17 @@ class ADBManager: ObservableObject {
     }
 
     func startLogcat() {
-        guard FileManager.default.isExecutableFile(atPath: adbPath) else {
-            print("❌ ADB not found at \(adbPath)")
+        let isIOS = selectedPlatform == .ios
+        let executablePath = isIOS ? ideviceSyslogPath : adbPath
+
+        guard FileManager.default.isExecutableFile(atPath: executablePath) else {
+            if isIOS {
+                toolMessage = "idevicesyslog not found. Install libimobiledevice: brew install libimobiledevice"
+            }
+            print("❌ \(isIOS ? "idevicesyslog" : "ADB") not found at \(executablePath)")
             return
         }
+        toolMessage = nil
 
         entryIndex = 0
         pendingLock.lock()
@@ -86,13 +132,14 @@ class ADBManager: ObservableObject {
         pendingLock.unlock()
 
         // Resolve the PIDs of the selected package before reading, so the very first
-        // lines are already filtered.
+        // lines are already filtered. iOS lines are filtered by process name instead.
         let device = selectedDevice
         let package = selectedPackage
-        let pids = package.map { fetchPids(for: $0, device: device) }
+        let pids = isIOS ? nil : package.map { fetchPids(for: $0, device: device) }
 
         stateLock.lock()
         filterState.device = device
+        filterState.isIOS = isIOS
         filterState.package = package
         filterState.pids = pids
         filterState.generation += 1
@@ -107,8 +154,10 @@ class ADBManager: ObservableObject {
 
         pipe = Pipe()
         task = Process()
-        task?.executableURL = URL(fileURLWithPath: adbPath)
-        if let device {
+        task?.executableURL = URL(fileURLWithPath: executablePath)
+        if isIOS {
+            task?.arguments = Self.syslogArguments(device: device, package: package)
+        } else if let device {
             task?.arguments = ["-s", device, "logcat"]
         } else {
             task?.arguments = ["logcat"]
@@ -290,6 +339,7 @@ class ADBManager: ObservableObject {
 
         stateLock.lock()
         filterState.device = device
+        filterState.isIOS = selectedPlatform == .ios
         filterState.package = package
         stateLock.unlock()
 
@@ -303,9 +353,11 @@ class ADBManager: ObservableObject {
         stateLock.lock()
         let package = filterState.package
         let device = filterState.device
+        let isIOS = filterState.isIOS
         stateLock.unlock()
 
-        guard let package else {
+        // No PID filtering for "all apps", nor on iOS where idevicesyslog filters by process name
+        guard let package, !isIOS else {
             stateLock.lock()
             filterState.pids = nil
             stateLock.unlock()
@@ -329,7 +381,8 @@ class ADBManager: ObservableObject {
 
     private func startPidRefreshTimer() {
         stopPidRefreshTimer()
-        guard selectedPackage != nil else { return }
+        // iOS streams are already restricted to the app's process by idevicesyslog
+        guard selectedPackage != nil, selectedPlatform == .android else { return }
 
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         timer.schedule(deadline: .now() + 2, repeating: 2)
@@ -364,6 +417,21 @@ class ADBManager: ObservableObject {
             return AppPackage.allCases.contains { $0.matches(line: line) }
         }
         return package.matches(line: line)
+    }
+
+    /// Arguments for `idevicesyslog`. With an app selected, `-p` restricts the stream to its
+    /// process(es); idevicesyslog accepts several process names separated by `|`.
+    /// Text filtering stays client-side (`shouldKeep`) rather than `-m`, so both platforms
+    /// share the exact same analytics matching.
+    static func syslogArguments(device: String?, package: AppPackage?) -> [String] {
+        var arguments = ["--no-colors"]
+        if let device {
+            arguments += ["-u", device]
+        }
+        if let package, !package.iosProcessNames.isEmpty {
+            arguments += ["-p", package.iosProcessNames.joined(separator: "|")]
+        }
+        return arguments
     }
 
     private func publishPackagePids(_ pids: Set<String>?) {
@@ -426,11 +494,94 @@ class ADBManager: ObservableObject {
 
     /// Runs a short-lived adb command and returns its stdout, or `nil` on failure
     private func runADB(_ arguments: [String], device: String?) -> String? {
-        guard FileManager.default.isExecutableFile(atPath: adbPath) else { return nil }
+        runTool(adbPath, (device.map { ["-s", $0] } ?? []) + arguments)
+    }
+
+    // MARK: - Devices
+
+    /// Lists the Android and iOS devices plugged in. The tools run on a background queue
+    /// (resolving iPhone names spawns one process per device); the result is applied on main.
+    func refreshDevices() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let devices = self.listAndroidDevices() + self.listIOSDevices()
+
+            DispatchQueue.main.async {
+                let previousDevice = self.selectedDevice
+                self.connectedDevices = devices
+                if !devices.contains(where: { $0.id == previousDevice }) {
+                    self.selectedDevice = devices.first?.id
+                }
+                // A device change already refreshes the PIDs through `selectedDevice`
+                if self.selectedDevice == previousDevice {
+                    self.refreshPackagePids()
+                }
+
+                // With a single device there is nothing to choose: start streaming right away.
+                // Only once, so a manual Stop is not undone by a later device refresh.
+                if devices.count == 1, !self.hasAutoStarted, !self.isLogcatRunning {
+                    self.hasAutoStarted = true
+                    self.startLogcat()
+                }
+            }
+        }
+    }
+
+    /// Devices in the `device` state reported by `adb devices` (unauthorized/offline ones are skipped)
+    private func listAndroidDevices() -> [Device] {
+        guard FileManager.default.isExecutableFile(atPath: adbPath) else {
+            print("❌ ADB not found at \(adbPath)")
+            return []
+        }
+        guard let output = runTool(adbPath, ["devices"]) else {
+            print("❌ Failed to get adb devices")
+            return []
+        }
+
+        return output
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.contains("List of devices") }
+            .compactMap { line -> Device? in
+                let parts = line.split(separator: "\t")
+                guard parts.count >= 2, parts[1] == "device" else { return nil }
+                let serial = String(parts[0])
+                return Device(id: serial, name: serial, platform: .android)
+            }
+    }
+
+    /// USB-connected iPhones reported by `idevice_id -l` (one UDID per line), named via `ideviceinfo`.
+    /// Silently empty when libimobiledevice is not installed.
+    private func listIOSDevices() -> [Device] {
+        guard FileManager.default.isExecutableFile(atPath: ideviceIdPath) else {
+            if !hasReportedMissingIOSTools {
+                hasReportedMissingIOSTools = true
+                print("ℹ️ idevice_id not found at \(ideviceIdPath): iOS devices are skipped (brew install libimobiledevice)")
+            }
+            return []
+        }
+        guard let output = runTool(ideviceIdPath, ["-l"]) else { return [] }
+
+        let udids = output
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
+        return udids.map { udid in
+            // Fails on an iPhone that has not trusted this Mac yet: fall back to the UDID
+            let name = runTool(ideviceInfoPath, ["-u", udid, "-k", "DeviceName"])?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return Device(id: udid, name: (name?.isEmpty == false ? name : nil) ?? udid, platform: .ios)
+        }
+    }
+
+    /// Runs a short-lived command and returns its stdout, or `nil` when it is missing or fails
+    private func runTool(_ path: String, _ arguments: [String]) -> String? {
+        guard FileManager.default.isExecutableFile(atPath: path) else { return nil }
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: adbPath)
-        process.arguments = (device.map { ["-s", $0] } ?? []) + arguments
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
 
         let outPipe = Pipe()
         process.standardOutput = outPipe
@@ -444,64 +595,6 @@ class ADBManager: ObservableObject {
             return String(data: data, encoding: .utf8)
         } catch {
             return nil
-        }
-    }
-
-    // MARK: - Devices
-
-    func refreshDevices() {
-        guard FileManager.default.isExecutableFile(atPath: adbPath) else {
-            print("❌ ADB not found at \(adbPath)")
-            return
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: adbPath)
-        process.arguments = ["devices"]
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                let lines = output
-                    .split(separator: "\n")
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty && !$0.contains("List of devices") }
-
-                let deviceIDs = lines.compactMap { line -> String? in
-                    let parts = line.split(separator: "\t")
-                    if parts.count >= 2 && parts[1] == "device" {
-                        return String(parts[0])
-                    }
-                    return nil
-                }
-
-                DispatchQueue.main.async {
-                    let previousDevice = self.selectedDevice
-                    self.connectedDevices = deviceIDs
-                    if !deviceIDs.contains(previousDevice ?? "") {
-                        self.selectedDevice = deviceIDs.first
-                    }
-                    // A device change already refreshes the PIDs through `selectedDevice`
-                    if self.selectedDevice == previousDevice {
-                        self.refreshPackagePids()
-                    }
-
-                    // With a single device there is nothing to choose: start streaming right away.
-                    // Only once, so a manual Stop is not undone by a later device refresh.
-                    if deviceIDs.count == 1, !self.hasAutoStarted, !self.isLogcatRunning {
-                        self.hasAutoStarted = true
-                        self.startLogcat()
-                    }
-                }
-            }
-        } catch {
-            print("❌ Failed to get devices: \(error)")
         }
     }
 }

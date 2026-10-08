@@ -11,6 +11,7 @@ struct ContentView: View {
     @StateObject private var adbManager = ADBManager()
     @StateObject private var themeManager = ThemeManager()
     @StateObject private var fixList = FixListStore()
+    @StateObject private var androidProject = AndroidProjectManager()
 
     @State private var searchText: String = ""
     @State private var selectedLevel: LogEntry.LogLevel? = nil
@@ -111,6 +112,24 @@ struct ContentView: View {
                 // App package section
                 SidebarSection(title: "App", icon: "app.badge") {
                     PackageSelectorView(adbManager: adbManager)
+                }
+
+                // Android project: branch, build and run on the selected device
+                SidebarSection(title: "Project", icon: "hammer") {
+                    if adbManager.selectedPlatform == .ios {
+                        // Gradle build & run only targets Android devices
+                        Text("Build & Run is available for Android devices only.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        AndroidProjectView(project: androidProject, adbManager: adbManager) { packageName in
+                            // Follow the app that was just launched when it is one of the known packages
+                            if let package = AppPackage.allCases.first(where: { $0.packageNames.contains(packageName) }) {
+                                adbManager.selectedPackage = package
+                            }
+                        }
+                    }
                 }
 
                 // Filter section
@@ -561,7 +580,10 @@ struct LogDetailView: View {
                 if !entry.pid.isEmpty {
                     HStack(spacing: 12) {
                         MetadataChip(label: "PID", value: entry.pid)
-                        MetadataChip(label: "TID", value: entry.tid)
+                        // idevicesyslog lines carry no thread id
+                        if !entry.tid.isEmpty {
+                            MetadataChip(label: "TID", value: entry.tid)
+                        }
                         MetadataChip(label: entry.tags.count > 1 ? "Tags" : "Tag",
                                      value: entry.tags.joined(separator: ", "))
                     }
