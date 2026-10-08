@@ -1,20 +1,38 @@
 import Foundation
 
 class ADBManager: ObservableObject {
-    @Published var logEntries: [LogEntry] = []
-    @Published var isLogcatRunning = false
-    @Published var connectedDevices: [String] = []
+    /// How many entries are kept, oldest dropped first. "All logs" captures around 100 lines/s
+    /// while the app is in use, so this holds about a quarter of an hour.
+    static let maxEntries = 100_000
 
-    @Published var selectedDevice: String? = nil {
+    @Published var logEntries: [LogEntry] = []
+    /// Every tag seen since the last clear, sorted, for the filter bar.
+    /// Kept up to date as entries come in, so the view does not scan the whole buffer on every refresh.
+    @Published private(set) var seenTags: [String] = []
+    @Published var isLogcatRunning = false
+    @Published var connectedDevices: [Device] = []
+
+    @Published var selectedDevice: Device? = nil {
         didSet {
-            guard oldValue != selectedDevice else { return }
-            refreshPackagePids()
+            // A refreshed instance of the same device (possibly renamed) is still the same selection,
+            // unless it is now reached another way (USB ↔ Wi-Fi): the stream must be restarted then
+            guard oldValue?.id != selectedDevice?.id || oldValue?.isWireless != selectedDevice?.isWireless
+            else { return }
+            deviceSelectionChanged()
         }
     }
+
+    /// One `Platform: install command` hint per platform whose command-line tools are missing
+    @Published var missingTools: [String] = []
 
     /// The app package whose logs are displayed. `nil` means "all apps" (no package filtering).
     @Published var selectedPackage: AppPackage? {
         didSet { packageSelectionChanged(from: oldValue) }
+    }
+
+    /// Whether only the analytics events or every log of the followed apps are captured
+    @Published var captureMode: CaptureMode {
+        didSet { captureModeChanged(from: oldValue) }
     }
 
     /// PIDs currently matching `selectedPackage` on the selected device (empty when the app is not running)
@@ -32,7 +50,8 @@ class ADBManager: ObservableObject {
     /// State shared with the background threads (reader + PID refresher), guarded by `stateLock`
     private struct FilterState {
         var package: AppPackage?
-        var device: String?
+        var device: Device?
+        var mode: CaptureMode = .analytics
         /// `nil` means no PID filtering; an empty set means "the app is not running"
         var pids: Set<String>?
         /// Bumped on every start/stop so a stale reader thread stops publishing entries
@@ -47,36 +66,40 @@ class ADBManager: ObservableObject {
     private var hasAutoStarted = false
 
     private static let selectedPackageKey = "selectedPackage"
+    private static let captureModeKey = "captureMode"
 
-    let adbPath: String = "/opt/homebrew/bin/adb"
+    private let androidBridge = AndroidBridge()
+    private let iosBridge = IOSBridge()
+
+    private var bridges: [DeviceBridge] { [androidBridge, iosBridge] }
+
+    private func bridge(for platform: DevicePlatform) -> DeviceBridge {
+        switch platform {
+        case .android: return androidBridge
+        case .ios: return iosBridge
+        }
+    }
 
     init() {
         let stored = UserDefaults.standard.string(forKey: Self.selectedPackageKey)
         selectedPackage = stored.flatMap(AppPackage.init(rawValue:)) ?? .photoPrint
+        let storedMode = UserDefaults.standard.string(forKey: Self.captureModeKey)
+        captureMode = storedMode.flatMap(CaptureMode.init(rawValue:)) ?? .analytics
         filterState.package = selectedPackage
-    }
-
-    func startADBServer() {
-        guard FileManager.default.isExecutableFile(atPath: adbPath) else {
-            print("❌ ADB not found at \(adbPath)")
-            return
-        }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: adbPath)
-        process.arguments = ["start-server"]
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            print("✅ ADB server started")
-        } catch {
-            print("❌ Failed to start adb server: \(error)")
-        }
+        filterState.mode = captureMode
     }
 
     func startLogcat() {
-        guard FileManager.default.isExecutableFile(atPath: adbPath) else {
-            print("❌ ADB not found at \(adbPath)")
+        guard let device = selectedDevice else {
+            print("❌ No device selected")
+            return
+        }
+
+        let bridge = bridge(for: device.platform)
+        let package = selectedPackage
+        let mode = captureMode
+        guard let command = bridge.streamCommand(device: device, package: package, mode: mode) else {
+            print("❌ \(device.platform.displayName) tools not found — \(bridge.installCommand)")
             return
         }
 
@@ -87,13 +110,12 @@ class ADBManager: ObservableObject {
 
         // Resolve the PIDs of the selected package before reading, so the very first
         // lines are already filtered.
-        let device = selectedDevice
-        let package = selectedPackage
-        let pids = package.map { fetchPids(for: $0, device: device) }
+        let pids = Self.runningPids(of: Self.followedPackages(package, mode: mode), bridge: bridge, device: device)
 
         stateLock.lock()
         filterState.device = device
         filterState.package = package
+        filterState.mode = mode
         filterState.pids = pids
         filterState.generation += 1
         let generation = filterState.generation
@@ -107,18 +129,14 @@ class ADBManager: ObservableObject {
 
         pipe = Pipe()
         task = Process()
-        task?.executableURL = URL(fileURLWithPath: adbPath)
-        if let device {
-            task?.arguments = ["-s", device, "logcat"]
-        } else {
-            task?.arguments = ["logcat"]
-        }
+        task?.executableURL = command.executable
+        task?.arguments = command.arguments
 
         task?.standardOutput = pipe
         task?.standardError = pipe
 
         guard let fileHandle = pipe?.fileHandleForReading else {
-            print("❌ Failed to create pipe for adb output")
+            print("❌ Failed to create pipe for the log stream")
             return
         }
 
@@ -132,17 +150,24 @@ class ADBManager: ObservableObject {
                 self.isLogcatRunning = true
             }
 
+            let platform = device.platform
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self else { return }
-                let bufferSize = 8192
                 var leftoverData = Data()
+                var reachedEnd = false
 
-                while self.task?.isRunning == true, self.isCurrentGeneration(generation) {
+                while !reachedEnd, self.task?.isRunning == true, self.isCurrentGeneration(generation) {
                     autoreleasepool {
                         // PIDs are refreshed periodically, so re-read the filter on every chunk
                         let (activePids, activePackage) = self.currentFilter()
 
-                        if let data = try? fileHandle.read(upToCount: bufferSize), !data.isEmpty {
+                        // `availableData` returns as soon as anything was written, whereas `read(upToCount:)`
+                        // waits for the full count: a sparse (filtered) stream would only show up every 8 KB.
+                        let data = fileHandle.availableData
+                        // An empty read is the end of the stream: the tool exited
+                        reachedEnd = data.isEmpty
+
+                        if !data.isEmpty {
                             leftoverData.append(data)
 
                             while let range = leftoverData.range(of: Data([0x0A])) {
@@ -152,10 +177,12 @@ class ADBManager: ObservableObject {
                                 guard let line = String(data: lineData, encoding: .utf8) else { continue }
 
                                 // Only keep the analytics lines of the selected app
-                                guard Self.shouldKeep(line: line, package: activePackage) else { continue }
+                                guard Self.shouldKeep(line: line, package: activePackage, platform: platform, mode: mode)
+                                else { continue }
 
-                                // Only keep lines emitted by the selected package's process(es)
-                                if let activePids {
+                                // Only keep lines emitted by the selected package's process(es).
+                                // iOS streams are already filtered by process name on the device side.
+                                if platform == .android, let activePids {
                                     guard let pid = LogEntry.extractPid(from: line),
                                           activePids.contains(pid) else { continue }
                                 }
@@ -183,7 +210,7 @@ class ADBManager: ObservableObject {
             DispatchQueue.main.async {
                 self.isLogcatRunning = false
             }
-            print("❌ Failed to run adb logcat: \(error)")
+            print("❌ Failed to start the log stream: \(error)")
         }
     }
 
@@ -208,6 +235,7 @@ class ADBManager: ObservableObject {
         pendingLock.unlock()
         DispatchQueue.main.async {
             self.logEntries.removeAll()
+            self.seenTags.removeAll()
         }
     }
 
@@ -238,29 +266,40 @@ class ADBManager: ObservableObject {
         guard !batch.isEmpty else { return }
 
         DispatchQueue.main.async {
+            // Each in-place mutation of a @Published array copies it whole: detach the buffer
+            // so it is uniquely referenced, mutate it, then publish it back once.
+            var entries = self.logEntries
+            self.logEntries = []
+
             for entry in batch {
                 // The same event is often logged once per analytics backend, under a different
                 // tag each time: fold those duplicates into a single entry carrying every tag.
-                if let index = self.indexOfSameEvent(as: entry) {
-                    self.logEntries[index].merge(entry)
+                if let index = Self.indexOfSameEvent(as: entry, in: entries) {
+                    entries[index].merge(entry)
                 } else {
-                    self.logEntries.append(entry)
+                    entries.append(entry)
                 }
             }
-            // Limit buffer to last 5000 entries
-            if self.logEntries.count > 5000 {
-                self.logEntries.removeFirst(self.logEntries.count - 5000)
+            if entries.count > Self.maxEntries {
+                entries.removeFirst(entries.count - Self.maxEntries)
+            }
+            self.logEntries = entries
+
+            // Tags of dropped entries stay listed until the next clear
+            let newTags = Set(batch.flatMap(\.tags)).subtracting(self.seenTags)
+            if !newTags.isEmpty {
+                self.seenTags = (self.seenTags + newTags).sorted()
             }
         }
     }
 
     /// Looks back through the most recent entries for the same event logged under another tag.
     /// Duplicates are emitted back to back, so a short window is enough.
-    private func indexOfSameEvent(as entry: LogEntry) -> Int? {
+    private static func indexOfSameEvent(as entry: LogEntry, in entries: [LogEntry]) -> Int? {
         let window = 50
-        let lowerBound = max(0, logEntries.count - window)
-        for index in stride(from: logEntries.count - 1, through: lowerBound, by: -1)
-        where logEntries[index].isSameEvent(as: entry) {
+        let lowerBound = max(0, entries.count - window)
+        for index in stride(from: entries.count - 1, through: lowerBound, by: -1)
+        where entries[index].isSameEvent(as: entry) {
             return index
         }
         return nil
@@ -283,14 +322,43 @@ class ADBManager: ObservableObject {
         }
     }
 
+    /// Called on the main queue whenever the capture mode changes
+    private func captureModeChanged(from oldValue: CaptureMode) {
+        guard oldValue != captureMode else { return }
+        UserDefaults.standard.set(captureMode.rawValue, forKey: Self.captureModeKey)
+
+        if isLogcatRunning {
+            // The buffered logs were captured with the other mode: restart from a clean slate
+            stopLogcat()
+            clearLogs()
+            startLogcat()
+        } else {
+            refreshPackagePids()
+        }
+    }
+
+    /// Called on the main queue whenever another device gets selected
+    private func deviceSelectionChanged() {
+        if isLogcatRunning, selectedDevice != nil {
+            // The buffered logs come from the previous device: restart from a clean slate
+            stopLogcat()
+            clearLogs()
+            startLogcat()
+        } else {
+            refreshPackagePids()
+        }
+    }
+
     /// Re-resolves the PIDs of the selected package. Must be called from the main queue.
     func refreshPackagePids() {
         let device = selectedDevice
         let package = selectedPackage
+        let mode = captureMode
 
         stateLock.lock()
         filterState.device = device
         filterState.package = package
+        filterState.mode = mode
         stateLock.unlock()
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -303,9 +371,10 @@ class ADBManager: ObservableObject {
         stateLock.lock()
         let package = filterState.package
         let device = filterState.device
+        let mode = filterState.mode
         stateLock.unlock()
 
-        guard let package else {
+        guard let device, let packages = Self.followedPackages(package, mode: mode) else {
             stateLock.lock()
             filterState.pids = nil
             stateLock.unlock()
@@ -313,11 +382,11 @@ class ADBManager: ObservableObject {
             return
         }
 
-        let pids = fetchPids(for: package, device: device)
+        let pids = Self.runningPids(of: packages, bridge: bridge(for: device.platform), device: device)
 
         stateLock.lock()
-        // Only apply if the selection did not change while adb was running
-        guard filterState.package == package, filterState.device == device else {
+        // Only apply if the selection did not change while the tool was running
+        guard filterState.package == package, filterState.device == device, filterState.mode == mode else {
             stateLock.unlock()
             return
         }
@@ -329,7 +398,7 @@ class ADBManager: ObservableObject {
 
     private func startPidRefreshTimer() {
         stopPidRefreshTimer()
-        guard selectedPackage != nil else { return }
+        guard Self.followedPackages(selectedPackage, mode: captureMode) != nil else { return }
 
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         timer.schedule(deadline: .now() + 2, repeating: 2)
@@ -357,13 +426,37 @@ class ADBManager: ObservableObject {
         return (filterState.pids, filterState.package)
     }
 
-    /// Whether a raw logcat line should be displayed for `package`.
-    /// With no package selected ("all apps"), a line is kept if it matches any known app's format.
-    private static func shouldKeep(line: String, package: AppPackage?) -> Bool {
-        guard let package else {
-            return AppPackage.allCases.contains { $0.matches(line: line) }
+    /// Whether a raw log line from a `platform` device should be displayed for `package`.
+    /// With no package selected ("all apps"), a line is kept if it fits any known app.
+    static func shouldKeep(line: String, package: AppPackage?, platform: DevicePlatform, mode: CaptureMode) -> Bool {
+        let packages = package.map { [$0] } ?? AppPackage.allCases
+
+        switch (mode, platform) {
+        case (.analytics, _):
+            return packages.contains { $0.matches(line: line, platform: platform) }
+        case (.all, .android):
+            // Narrowed down to the apps' processes by the PID filter
+            return true
+        case (.all, .ios):
+            return packages.contains { $0.isIOSLineFromApp(line) }
         }
-        return package.matches(line: line)
+    }
+
+    /// The apps whose PIDs are resolved, or `nil` when no PID is needed.
+    /// "All apps" in analytics mode recognizes the events by their format, from any process;
+    /// capturing every log instead follows the processes of every known app.
+    private static func followedPackages(_ package: AppPackage?, mode: CaptureMode) -> [AppPackage]? {
+        if let package { return [package] }
+        return mode == .all ? AppPackage.allCases : nil
+    }
+
+    /// The PIDs of every running process of `packages`, or `nil` when `packages` is `nil`
+    private static func runningPids(of packages: [AppPackage]?, bridge: DeviceBridge, device: Device) -> Set<String>? {
+        packages.map { packages in
+            packages.reduce(into: Set<String>()) { pids, package in
+                pids.formUnion(bridge.runningPids(for: package, device: device))
+            }
+        }
     }
 
     private func publishPackagePids(_ pids: Set<String>?) {
@@ -375,133 +468,50 @@ class ADBManager: ObservableObject {
         }
     }
 
-    /// Resolves the PIDs of every process belonging to `package`, across all its package
-    /// identifiers (release and debug builds) and the `:suffix` child processes an app may spawn.
-    private func fetchPids(for package: AppPackage, device: String?) -> Set<String> {
-        // The process list is the most reliable source: unlike `pidof` it also matches
-        // build variants and child processes.
-        for arguments in [["shell", "ps", "-A", "-o", "PID,NAME"], ["shell", "ps", "-A"]] {
-            guard let output = runADB(arguments, device: device) else { continue }
-            var pids: Set<String> = []
-            for name in package.packageNames {
-                pids.formUnion(Self.pids(in: output, matching: name))
-            }
-            if !pids.isEmpty { return pids }
-        }
-
-        // Last resort on devices with an unusual `ps`: exact process names
-        var pids: Set<String> = []
-        for processName in package.processNames {
-            guard let output = runADB(["shell", "pidof", processName], device: device) else { continue }
-            pids.formUnion(
-                output
-                    .split(whereSeparator: { $0.isWhitespace })
-                    .map(String.init)
-                    .filter { Int($0) != nil }
-            )
-        }
-        return pids
-    }
-
-    /// Extracts the PIDs whose process name is exactly `package` (or a `package:child` process)
-    /// from a `ps` listing. Handles both `ps -A -o PID,NAME` and the legacy multi-column output.
-    static func pids(in output: String, matching package: String) -> Set<String> {
-        var pids: Set<String> = []
-
-        for line in output.split(separator: "\n") {
-            let columns = line.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-            guard columns.count >= 2,
-                  let pid = columns.first(where: { Int($0) != nil }),
-                  let processName = columns.last else { continue }
-
-            // Exact package name, or one of its `:remote` child processes.
-            // Build variants (.debug) are listed explicitly in `AppPackage.packageNames`.
-            if processName == package || processName.hasPrefix("\(package):") {
-                pids.insert(pid)
-            }
-        }
-
-        return pids
-    }
-
-    /// Runs a short-lived adb command and returns its stdout, or `nil` on failure
-    private func runADB(_ arguments: [String], device: String?) -> String? {
-        guard FileManager.default.isExecutableFile(atPath: adbPath) else { return nil }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: adbPath)
-        process.arguments = (device.map { ["-s", $0] } ?? []) + arguments
-
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return nil }
-            return String(data: data, encoding: .utf8)
-        } catch {
-            return nil
-        }
-    }
-
     // MARK: - Devices
 
+    /// Lists the devices of every platform whose tools are installed, off the main queue
     func refreshDevices() {
-        guard FileManager.default.isExecutableFile(atPath: adbPath) else {
-            print("❌ ADB not found at \(adbPath)")
-            return
-        }
+        let bridges = self.bridges
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: adbPath)
-        process.arguments = ["devices"]
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                let lines = output
-                    .split(separator: "\n")
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty && !$0.contains("List of devices") }
-
-                let deviceIDs = lines.compactMap { line -> String? in
-                    let parts = line.split(separator: "\t")
-                    if parts.count >= 2 && parts[1] == "device" {
-                        return String(parts[0])
-                    }
-                    return nil
-                }
-
-                DispatchQueue.main.async {
-                    let previousDevice = self.selectedDevice
-                    self.connectedDevices = deviceIDs
-                    if !deviceIDs.contains(previousDevice ?? "") {
-                        self.selectedDevice = deviceIDs.first
-                    }
-                    // A device change already refreshes the PIDs through `selectedDevice`
-                    if self.selectedDevice == previousDevice {
-                        self.refreshPackagePids()
-                    }
-
-                    // With a single device there is nothing to choose: start streaming right away.
-                    // Only once, so a manual Stop is not undone by a later device refresh.
-                    if deviceIDs.count == 1, !self.hasAutoStarted, !self.isLogcatRunning {
-                        self.hasAutoStarted = true
-                        self.startLogcat()
-                    }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var devices: [Device] = []
+            var missingTools: [String] = []
+            for bridge in bridges {
+                if bridge.isAvailable {
+                    devices += bridge.listDevices()
+                } else {
+                    missingTools.append("\(bridge.platform.displayName): \(bridge.installCommand)")
                 }
             }
-        } catch {
-            print("❌ Failed to get devices: \(error)")
+
+            DispatchQueue.main.async {
+                self?.applyDevices(devices, missingTools: missingTools)
+            }
+        }
+    }
+
+    /// Publishes a fresh device list, keeping the current selection while it is still connected
+    private func applyDevices(_ devices: [Device], missingTools: [String]) {
+        let previousDevice = selectedDevice
+        connectedDevices = devices
+        if self.missingTools != missingTools {
+            self.missingTools = missingTools
+        }
+
+        // Re-select the refreshed instance so the picker shows its current name
+        selectedDevice = devices.first { $0.id == previousDevice?.id } ?? devices.first
+
+        // A device change already refreshes the PIDs through `selectedDevice`
+        if selectedDevice?.id == previousDevice?.id {
+            refreshPackagePids()
+        }
+
+        // With a single device there is nothing to choose: start streaming right away.
+        // Only once, so a manual Stop is not undone by a later device refresh.
+        if devices.count == 1, !hasAutoStarted, !isLogcatRunning {
+            hasAutoStarted = true
+            startLogcat()
         }
     }
 }
