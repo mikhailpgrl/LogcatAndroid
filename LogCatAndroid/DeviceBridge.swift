@@ -14,8 +14,11 @@ protocol DeviceBridge {
     /// Whether the command-line tools this bridge relies on are installed
     var isAvailable: Bool { get }
 
-    /// The command that installs the missing tools, shown when `isAvailable` is false
-    var installCommand: String { get }
+    /// The name of those tools, shown in the setup screen
+    var toolName: String { get }
+
+    /// The `brew` arguments installing those tools
+    var brewInstallArguments: [String] { get }
 
     /// The devices currently connected. Blocks while the tool runs: call it off the main queue.
     func listDevices() -> [Device]
@@ -26,6 +29,13 @@ protocol DeviceBridge {
 
     /// The PIDs of every running process of `package` on `device`. Blocks while the tool runs.
     func runningPids(for package: AppPackage, device: Device) -> Set<String>
+}
+
+extension DeviceBridge {
+    /// The command that installs the tools, shown in the setup screen
+    var installCommand: String {
+        (["brew"] + brewInstallArguments).joined(separator: " ")
+    }
 }
 
 // MARK: - Tools
@@ -69,7 +79,8 @@ enum Tool {
 /// Streams `adb logcat` from Android devices
 struct AndroidBridge: DeviceBridge {
     let platform = DevicePlatform.android
-    let installCommand = "brew install --cask android-platform-tools"
+    let toolName = "adb"
+    let brewInstallArguments = ["install", "--cask", "android-platform-tools"]
 
     /// Resolved on every use so a tool installed while the app runs is picked up on refresh
     private var adbPath: String? {
@@ -168,7 +179,8 @@ struct AndroidBridge: DeviceBridge {
 /// Wi-Fi devices must be paired with this Mac and have "Show this iPhone when on Wi-Fi" enabled.
 struct IOSBridge: DeviceBridge {
     let platform = DevicePlatform.ios
-    let installCommand = "brew install libimobiledevice"
+    let toolName = "libimobiledevice"
+    let brewInstallArguments = ["install", "libimobiledevice"]
 
     /// In analytics mode, only the lines holding this marker are relayed: both iOS codebases
     /// log events as `logId=[name] parameters=[{json}] ...` (see `AppPackage.matches(line:platform:)`)

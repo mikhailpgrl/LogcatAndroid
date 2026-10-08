@@ -2,6 +2,8 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var themeManager: ThemeManager
+    /// Opens the setup screen that checks and installs the command-line tools
+    var onSetUpTools: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -26,6 +28,20 @@ struct SettingsView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
+                    // Tools section
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Tools", systemImage: "wrench.and.screwdriver")
+                            .font(.headline)
+
+                        HStack {
+                            Text("adb and libimobiledevice, used to read device logs")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Set Up Tools…", action: onSetUpTools)
+                        }
+                    }
+
                     // Theme section
                     VStack(alignment: .leading, spacing: 12) {
                         Label("Theme", systemImage: "paintbrush")
