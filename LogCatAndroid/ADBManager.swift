@@ -18,16 +18,22 @@ class ADBManager: ObservableObject {
             // unless it is now reached another way (USB ↔ Wi-Fi): the stream must be restarted then
             guard oldValue?.id != selectedDevice?.id || oldValue?.isWireless != selectedDevice?.isWireless
             else { return }
-            deviceSelectionChanged()
+            deviceSelectionChanged(from: oldValue)
         }
     }
 
     /// The platforms whose command-line tools are not installed, so their devices cannot be listed
     @Published private(set) var platformsMissingTools: [DevicePlatform] = []
 
-    /// The app package whose logs are displayed. `nil` means "all apps" (no package filtering).
-    @Published var selectedPackage: AppPackage? {
-        didSet { packageSelectionChanged(from: oldValue) }
+    /// The build whose logs are displayed, one of the selected device's platform. `nil` means "all apps".
+    /// Each platform remembers its own selection.
+    @Published var selectedBuild: AppBuild? {
+        didSet { buildSelectionChanged(from: oldValue) }
+    }
+
+    /// The platform whose builds the app picker lists: the selected device's
+    var currentPlatform: DevicePlatform {
+        selectedDevice?.platform ?? .android
     }
 
     /// Whether only the analytics events or every log of the followed apps are captured
@@ -35,8 +41,15 @@ class ADBManager: ObservableObject {
         didSet { captureModeChanged(from: oldValue) }
     }
 
-    /// PIDs currently matching `selectedPackage` on the selected device (empty when the app is not running)
-    @Published var packagePids: [String] = []
+    /// PIDs currently running `selectedBuild` on the selected device (empty when it is not running)
+    @Published private(set) var buildPids: [String] = []
+
+    /// Every PID attributed to `selectedBuild` during the current stream, when its entries are told
+    /// apart at display time: the builds of an iOS app share their process, so the stream carries
+    /// them all, and a PID is only attributed a moment after the app starts. Filtering the display
+    /// rather than the capture keeps the first events of a freshly launched build.
+    /// `nil` when every captured entry belongs to the selection.
+    @Published private(set) var attributedPids: Set<String>?
 
     private var task: Process?
     private var pipe: Pipe?
@@ -49,7 +62,7 @@ class ADBManager: ObservableObject {
 
     /// State shared with the background threads (reader + PID refresher), guarded by `stateLock`
     private struct FilterState {
-        var package: AppPackage?
+        var build: AppBuild?
         var device: Device?
         var mode: CaptureMode = .analytics
         /// `nil` means no PID filtering; an empty set means "the app is not running"
@@ -65,8 +78,18 @@ class ADBManager: ObservableObject {
     /// Whether logcat was already started automatically for a lone connected device
     private var hasAutoStarted = false
 
-    private static let selectedPackageKey = "selectedPackage"
+    /// Set while the build selection is swapped for another platform's, which is not a user choice
+    private var isSwitchingPlatform = false
+
     private static let captureModeKey = "captureMode"
+
+    private static func selectedBuildKey(for platform: DevicePlatform) -> String {
+        "selectedBuild.\(platform.rawValue)"
+    }
+
+    private static func storedBuild(for platform: DevicePlatform) -> AppBuild? {
+        UserDefaults.standard.string(forKey: selectedBuildKey(for: platform)).flatMap(AppBuild.build(withID:))
+    }
 
     private let androidBridge = AndroidBridge()
     private let iosBridge = IOSBridge()
@@ -81,11 +104,11 @@ class ADBManager: ObservableObject {
     }
 
     init() {
-        let stored = UserDefaults.standard.string(forKey: Self.selectedPackageKey)
-        selectedPackage = stored.flatMap(AppPackage.init(rawValue:)) ?? .photoPrint
+        // No device yet: the default platform's selection, swapped when a device of the other one shows up
+        selectedBuild = Self.storedBuild(for: .android)
         let storedMode = UserDefaults.standard.string(forKey: Self.captureModeKey)
         captureMode = storedMode.flatMap(CaptureMode.init(rawValue:)) ?? .analytics
-        filterState.package = selectedPackage
+        filterState.build = selectedBuild
         filterState.mode = captureMode
     }
 
@@ -96,9 +119,9 @@ class ADBManager: ObservableObject {
         }
 
         let bridge = bridge(for: device.platform)
-        let package = selectedPackage
+        let build = selectedBuild
         let mode = captureMode
-        guard let command = bridge.streamCommand(device: device, package: package, mode: mode) else {
+        guard let command = bridge.streamCommand(device: device, build: build, mode: mode) else {
             print("❌ \(device.platform.displayName) tools not found — \(bridge.installCommand)")
             return
         }
@@ -108,23 +131,25 @@ class ADBManager: ObservableObject {
         pendingEntries.removeAll()
         pendingLock.unlock()
 
-        // Resolve the PIDs of the selected package before reading, so the very first
+        // Resolve the PIDs of the selected build before reading, so the very first
         // lines are already filtered.
-        let pids = Self.runningPids(of: Self.followedPackages(package, mode: mode), bridge: bridge, device: device)
+        let followedBuilds = Self.followedBuilds(build, mode: mode, platform: device.platform)
+        let pids = Self.runningPids(of: followedBuilds, bridge: bridge, device: device)
+        attributedPids = Self.attributesPids(build: build, platform: device.platform) ? (pids ?? []) : nil
 
         stateLock.lock()
         filterState.device = device
-        filterState.package = package
+        filterState.build = build
         filterState.mode = mode
         filterState.pids = pids
         filterState.generation += 1
         let generation = filterState.generation
         stateLock.unlock()
 
-        publishPackagePids(pids)
+        publishBuildPids(pids)
 
-        if let package, let pids, pids.isEmpty {
-            print("⚠️ \(package.packageName) is not running — no logs will match until it starts")
+        if let build, let pids, pids.isEmpty {
+            print("⚠️ \(build.id) is not running — no logs will match until it starts")
         }
 
         pipe = Pipe()
@@ -159,7 +184,7 @@ class ADBManager: ObservableObject {
                 while !reachedEnd, self.task?.isRunning == true, self.isCurrentGeneration(generation) {
                     autoreleasepool {
                         // PIDs are refreshed periodically, so re-read the filter on every chunk
-                        let (activePids, activePackage) = self.currentFilter()
+                        let (activePids, activeBuild) = self.currentFilter()
 
                         // `availableData` returns as soon as anything was written, whereas `read(upToCount:)`
                         // waits for the full count: a sparse (filtered) stream would only show up every 8 KB.
@@ -177,11 +202,11 @@ class ADBManager: ObservableObject {
                                 guard let line = String(data: lineData, encoding: .utf8) else { continue }
 
                                 // Only keep the analytics lines of the selected app
-                                guard Self.shouldKeep(line: line, package: activePackage, platform: platform, mode: mode)
+                                guard Self.shouldKeep(line: line, build: activeBuild, platform: platform, mode: mode)
                                 else { continue }
 
-                                // Only keep lines emitted by the selected package's process(es).
-                                // iOS streams are already filtered by process name on the device side.
+                                // Only keep lines emitted by the selected build's process(es).
+                                // iOS builds are told apart at display time (see `attributedPids`).
                                 if platform == .android, let activePids {
                                     guard let pid = LogEntry.extractPid(from: line),
                                           activePids.contains(pid) else { continue }
@@ -305,12 +330,12 @@ class ADBManager: ObservableObject {
         return nil
     }
 
-    // MARK: - Package Filtering
+    // MARK: - Build Filtering
 
-    /// Called on the main queue whenever the user picks another app
-    private func packageSelectionChanged(from oldValue: AppPackage?) {
-        guard oldValue != selectedPackage else { return }
-        UserDefaults.standard.set(selectedPackage?.rawValue, forKey: Self.selectedPackageKey)
+    /// Called on the main queue whenever the user picks another build
+    private func buildSelectionChanged(from oldValue: AppBuild?) {
+        guard oldValue != selectedBuild, !isSwitchingPlatform else { return }
+        UserDefaults.standard.set(selectedBuild?.id, forKey: Self.selectedBuildKey(for: currentPlatform))
 
         if isLogcatRunning {
             // The buffered logs belong to the previous app: restart from a clean slate
@@ -318,7 +343,7 @@ class ADBManager: ObservableObject {
             clearLogs()
             startLogcat()
         } else {
-            refreshPackagePids()
+            refreshBuildPids()
         }
     }
 
@@ -333,77 +358,93 @@ class ADBManager: ObservableObject {
             clearLogs()
             startLogcat()
         } else {
-            refreshPackagePids()
+            refreshBuildPids()
         }
     }
 
     /// Called on the main queue whenever another device gets selected
-    private func deviceSelectionChanged() {
+    private func deviceSelectionChanged(from oldDevice: Device?) {
+        // Builds are per platform: bring back the one last picked for the new device's platform
+        if let platform = selectedDevice?.platform, platform != oldDevice?.platform {
+            isSwitchingPlatform = true
+            selectedBuild = Self.storedBuild(for: platform)
+            isSwitchingPlatform = false
+        }
+
         if isLogcatRunning, selectedDevice != nil {
             // The buffered logs come from the previous device: restart from a clean slate
             stopLogcat()
             clearLogs()
             startLogcat()
         } else {
-            refreshPackagePids()
+            refreshBuildPids()
         }
     }
 
-    /// Re-resolves the PIDs of the selected package. Must be called from the main queue.
-    func refreshPackagePids() {
+    /// Re-resolves the PIDs of the selected build. Must be called from the main queue.
+    func refreshBuildPids() {
         let device = selectedDevice
-        let package = selectedPackage
+        let build = selectedBuild
         let mode = captureMode
 
         stateLock.lock()
         filterState.device = device
-        filterState.package = package
+        filterState.build = build
         filterState.mode = mode
         stateLock.unlock()
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            self?.refreshPackagePidsFromState()
+            self?.refreshBuildPidsFromState()
         }
     }
 
-    /// Runs on a background queue: reads the current package/device, resolves PIDs, publishes them
-    private func refreshPackagePidsFromState() {
+    /// Runs on a background queue: reads the current build/device, resolves PIDs, publishes them
+    private func refreshBuildPidsFromState() {
         stateLock.lock()
-        let package = filterState.package
+        let build = filterState.build
         let device = filterState.device
         let mode = filterState.mode
         stateLock.unlock()
 
-        guard let device, let packages = Self.followedPackages(package, mode: mode) else {
+        guard let device, let builds = Self.followedBuilds(build, mode: mode, platform: device.platform) else {
             stateLock.lock()
             filterState.pids = nil
             stateLock.unlock()
-            publishPackagePids(nil)
+            publishBuildPids(nil)
             return
         }
 
-        let pids = Self.runningPids(of: packages, bridge: bridge(for: device.platform), device: device)
+        let pids = Self.runningPids(of: builds, bridge: bridge(for: device.platform), device: device)
 
         stateLock.lock()
         // Only apply if the selection did not change while the tool was running
-        guard filterState.package == package, filterState.device == device, filterState.mode == mode else {
+        guard filterState.build == build, filterState.device == device, filterState.mode == mode else {
             stateLock.unlock()
             return
         }
         filterState.pids = pids
         stateLock.unlock()
 
-        publishPackagePids(pids)
+        publishBuildPids(pids)
+        if let pids, Self.attributesPids(build: build, platform: device.platform) {
+            DispatchQueue.main.async {
+                // Only while a stream attributes PIDs: stopped, the display keeps what was captured
+                if let attributed = self.attributedPids, !pids.isSubset(of: attributed) {
+                    self.attributedPids = attributed.union(pids)
+                }
+            }
+        }
     }
 
     private func startPidRefreshTimer() {
         stopPidRefreshTimer()
-        guard Self.followedPackages(selectedPackage, mode: captureMode) != nil else { return }
+        guard let platform = selectedDevice?.platform,
+              Self.followedBuilds(selectedBuild, mode: captureMode, platform: platform) != nil else { return }
 
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         timer.schedule(deadline: .now() + 2, repeating: 2)
         timer.setEventHandler { [weak self] in
-            self?.refreshPackagePidsFromState()
+            self?.refreshBuildPidsFromState()
         }
         timer.resume()
         pidRefreshTimer = timer
@@ -420,50 +461,55 @@ class ADBManager: ObservableObject {
         return filterState.generation == generation
     }
 
-    private func currentFilter() -> (pids: Set<String>?, package: AppPackage?) {
+    private func currentFilter() -> (pids: Set<String>?, build: AppBuild?) {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return (filterState.pids, filterState.package)
+        return (filterState.pids, filterState.build)
     }
 
-    /// Whether a raw log line from a `platform` device should be displayed for `package`.
-    /// With no package selected ("all apps"), a line is kept if it fits any known app.
-    static func shouldKeep(line: String, package: AppPackage?, platform: DevicePlatform, mode: CaptureMode) -> Bool {
-        let packages = package.map { [$0] } ?? AppPackage.allCases
+    /// Whether a raw log line from a `platform` device should be captured for `build`.
+    /// With no build selected ("all apps"), a line is kept if it fits any known build of the platform.
+    static func shouldKeep(line: String, build: AppBuild?, platform: DevicePlatform, mode: CaptureMode) -> Bool {
+        let builds = build.map { [$0] } ?? AppBuild.builds(for: platform)
 
         switch (mode, platform) {
         case (.analytics, _):
-            return packages.contains { $0.matches(line: line, platform: platform) }
+            return builds.contains { $0.isAnalyticsLine(line) }
         case (.all, .android):
             // Narrowed down to the apps' processes by the PID filter
             return true
         case (.all, .ios):
-            return packages.contains { $0.isIOSLineFromApp(line) }
+            return builds.contains { $0.isIOSLineFromProcess(line) }
         }
     }
 
-    /// The apps whose PIDs are resolved, or `nil` when no PID is needed.
-    /// "All apps" in analytics mode recognizes the events by their format, from any process;
-    /// capturing every log instead follows the processes of every known app.
-    private static func followedPackages(_ package: AppPackage?, mode: CaptureMode) -> [AppPackage]? {
-        if let package { return [package] }
-        return mode == .all ? AppPackage.allCases : nil
+    /// The builds whose PIDs are resolved, or `nil` when no PID is needed: "all apps" recognizes
+    /// analytics by their format and iOS logs by their process name. Capturing every Android log
+    /// of "all apps" follows the processes of every known build instead.
+    private static func followedBuilds(_ build: AppBuild?, mode: CaptureMode, platform: DevicePlatform) -> [AppBuild]? {
+        if let build { return [build] }
+        return platform == .android && mode == .all ? AppBuild.builds(for: .android) : nil
     }
 
-    /// The PIDs of every running process of `packages`, or `nil` when `packages` is `nil`
-    private static func runningPids(of packages: [AppPackage]?, bridge: DeviceBridge, device: Device) -> Set<String>? {
-        packages.map { packages in
-            packages.reduce(into: Set<String>()) { pids, package in
-                pids.formUnion(bridge.runningPids(for: package, device: device))
+    /// Whether the entries of `build` are told apart by PID at display time (see `attributedPids`)
+    private static func attributesPids(build: AppBuild?, platform: DevicePlatform) -> Bool {
+        platform == .ios && build != nil
+    }
+
+    /// The PIDs of every running process of `builds`, or `nil` when `builds` is `nil`
+    private static func runningPids(of builds: [AppBuild]?, bridge: DeviceBridge, device: Device) -> Set<String>? {
+        builds.map { builds in
+            builds.reduce(into: Set<String>()) { pids, build in
+                pids.formUnion(bridge.runningPids(for: build, device: device))
             }
         }
     }
 
-    private func publishPackagePids(_ pids: Set<String>?) {
+    private func publishBuildPids(_ pids: Set<String>?) {
         let sorted = (pids ?? []).sorted { (Int($0) ?? 0) < (Int($1) ?? 0) }
         DispatchQueue.main.async {
-            if self.packagePids != sorted {
-                self.packagePids = sorted
+            if self.buildPids != sorted {
+                self.buildPids = sorted
             }
         }
     }
@@ -504,7 +550,7 @@ class ADBManager: ObservableObject {
 
         // A device change already refreshes the PIDs through `selectedDevice`
         if selectedDevice?.id == previousDevice?.id {
-            refreshPackagePids()
+            refreshBuildPids()
         }
 
         // With a single device there is nothing to choose: start streaming right away.

@@ -7,7 +7,7 @@ import Foundation
 
 /// Which logs of the followed apps are captured
 enum CaptureMode: String, CaseIterable, Identifiable {
-    /// Only the analytics events (see `AppPackage.matches(line:platform:)`)
+    /// Only the analytics events (see `AnalyticsFormat`)
     case analytics
     /// Every log line emitted by the apps' processes
     case all

@@ -71,6 +71,11 @@ struct ContentView: View {
     var filteredEntries: [LogEntry] {
         var entries = adbManager.logEntries
 
+        // iOS builds of an app share their process: keep the selected build's PIDs
+        if let pids = adbManager.attributedPids {
+            entries = entries.filter { pids.contains($0.pid) }
+        }
+
         if !selectedTags.isEmpty {
             // A merged entry carries several tags: keep it if any of them is selected
             entries = entries.filter { entry in entry.tags.contains(where: selectedTags.contains) }

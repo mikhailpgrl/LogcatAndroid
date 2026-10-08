@@ -32,8 +32,8 @@ A simple yet powerful desktop app that allows you to view and search the analyti
    - iOS: connect the iPhone via USB, unlock it and tap "Trust This Computer".
    - Over Wi-Fi: on Android, enable wireless debugging and `adb pair` / `adb connect`. On iOS, once the iPhone is trusted, enable "Show this iPhone when on Wi-Fi" in Finder; it then shows up as "· Wi-Fi" when unplugged, on the same network.
 
-3. **Pick the app**  
-   PhotoPrint maps to the Walgreens/CVS iOS apps (AppleLab), Pictadroid to Picta (picta-ios).
+3. **Pick the app build**  
+   The picker lists the production and integration builds of each app, with their bundle id or package name: PhotoPrint and Pictadroid on Android (`.debug` packages are the integration builds), Picta, Walgreens and CVS on iOS (`.int` bundles). The production and integration builds of an iOS app run under the same process name: telling them apart needs Xcode's `devicectl`, otherwise both show up.
 
 4. **Launch the App**  
    Run the application — connected devices will appear for selection.

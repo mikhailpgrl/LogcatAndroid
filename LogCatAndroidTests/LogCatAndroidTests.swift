@@ -8,6 +8,11 @@
 import Testing
 @testable import LogCatAndroid
 
+/// A build of the catalog, by bundle identifier or package name
+private func build(_ id: String) -> AppBuild {
+    AppBuild.build(withID: id)!
+}
+
 struct IOSLogParsingTests {
 
     /// Captured from Picta (TestFlight) through `idevicesyslog`
@@ -91,30 +96,34 @@ struct IOSLogParsingTests {
     }
 
     @Test func matchesIOSLinesPerApp() {
-        #expect(AppPackage.pictadroid.matches(line: pictaLine, platform: .ios))
-        #expect(!AppPackage.photoPrint.matches(line: pictaLine, platform: .ios))
+        #expect(build("com.pictarine.picta.ios").isAnalyticsLine(pictaLine))
+        // The integration build shares the process: PIDs tell them apart, not the line
+        #expect(build("com.pictarine.picta.ios.int").isAnalyticsLine(pictaLine))
+        #expect(!build("com.pictarine.Photo-Print").isAnalyticsLine(pictaLine))
 
         let walgreens = #"Oct  8 15:00:00.100000 Walgreens[42] <Info>: 📝: send - logId=[x] parameters=[{}] buildNumber=[1]"#
-        #expect(AppPackage.photoPrint.matches(line: walgreens, platform: .ios))
+        #expect(build("com.pictarine.Photo-Print").isAnalyticsLine(walgreens))
+        #expect(!build("com.pictarine.Photo-Print.cvs").isAnalyticsLine(walgreens))
 
         let networkLog = "Oct  8 14:57:04.381356 Picta[15846] <Info>: ✈️: pathUpdate - status=[connected] threadMain=[false]"
-        #expect(!AppPackage.pictadroid.matches(line: networkLog, platform: .ios))
-        #expect(!AppPackage.pictadroid.matches(line: "[connected:00008140-001258100163001C]", platform: .ios))
+        #expect(!build("com.pictarine.picta.ios").isAnalyticsLine(networkLog))
+        #expect(!build("com.pictarine.picta.ios").isAnalyticsLine("[connected:00008140-001258100163001C]"))
     }
 
     @Test func keepsEveryLogOfTheAppInAllLogsMode() {
+        let picta = build("com.pictarine.picta.ios.int")
         let networkLog = "Oct  8 14:57:04.381356 Picta[15846] <Info>: ✈️: pathUpdate - status=[connected] threadMain=[false]"
         let frameworkLog = "Oct  8 14:57:04.400000 Picta(CFNetwork)[15846] <Debug>: Task <1> finished"
         let otherApp = "Oct  8 14:57:04.500000 Walgreens[42] <Info>: something"
 
-        #expect(!ADBManager.shouldKeep(line: networkLog, package: .pictadroid, platform: .ios, mode: .analytics))
-        #expect(ADBManager.shouldKeep(line: pictaLine, package: .pictadroid, platform: .ios, mode: .analytics))
+        #expect(!ADBManager.shouldKeep(line: networkLog, build: picta, platform: .ios, mode: .analytics))
+        #expect(ADBManager.shouldKeep(line: pictaLine, build: picta, platform: .ios, mode: .analytics))
 
-        #expect(ADBManager.shouldKeep(line: networkLog, package: .pictadroid, platform: .ios, mode: .all))
-        #expect(ADBManager.shouldKeep(line: frameworkLog, package: .pictadroid, platform: .ios, mode: .all))
-        #expect(!ADBManager.shouldKeep(line: otherApp, package: .pictadroid, platform: .ios, mode: .all))
-        #expect(ADBManager.shouldKeep(line: otherApp, package: nil, platform: .ios, mode: .all))
-        #expect(!ADBManager.shouldKeep(line: "[connected:00008140-001258100163001C]", package: nil, platform: .ios, mode: .all))
+        #expect(ADBManager.shouldKeep(line: networkLog, build: picta, platform: .ios, mode: .all))
+        #expect(ADBManager.shouldKeep(line: frameworkLog, build: picta, platform: .ios, mode: .all))
+        #expect(!ADBManager.shouldKeep(line: otherApp, build: picta, platform: .ios, mode: .all))
+        #expect(ADBManager.shouldKeep(line: otherApp, build: nil, platform: .ios, mode: .all))
+        #expect(!ADBManager.shouldKeep(line: "[connected:00008140-001258100163001C]", build: nil, platform: .ios, mode: .all))
 
         #expect(LogEntry.parse(line: frameworkLog, index: 0).tags == ["CFNetwork"])
         #expect(LogEntry.parse(line: networkLog, index: 0).parsedFields.map(\.key) == ["status"])
@@ -124,6 +133,28 @@ struct IOSLogParsingTests {
         let output = "00008140-001258100163001C\n00008150-000C0CC614F0401C\n00008140-001258100163001C\n\n"
         #expect(IOSBridge.udids(in: output) == ["00008140-001258100163001C", "00008150-000C0CC614F0401C"])
         #expect(IOSBridge.udids(in: nil).isEmpty)
+    }
+
+    @Test func attributesProcessesToTheirAppBundle() {
+        let root = "file:///private/var/containers/Bundle/Application"
+        let apps: [String: Any] = ["apps": [
+            ["bundleIdentifier": "com.pictarine.picta.ios", "url": "\(root)/A9E1/Picta.app/"],
+            ["bundleIdentifier": "com.pictarine.picta.ios.int", "url": "\(root)/7D06/Picta.app/"],
+        ]]
+        let processes: [String: Any] = ["runningProcesses": [
+            ["processIdentifier": 11101, "executable": "\(root)/A9E1/Picta.app/Picta"],
+            ["processIdentifier": 11371, "executable": "\(root)/7D06/Picta.app/Picta"],
+            ["processIdentifier": 11400, "executable": "\(root)/7D06/Picta.app/PlugIns/Widget.appex/Widget"],
+            ["processIdentifier": 35, "executable": "file:///usr/libexec/logd"],
+        ]]
+
+        let bundleIDs = ProcessAttribution.bundleIdentifiers(apps: apps, processes: processes)
+        #expect(bundleIDs == [
+            "11101": "com.pictarine.picta.ios",
+            "11371": "com.pictarine.picta.ios.int",
+            "11400": "com.pictarine.picta.ios.int",
+            "35": "",
+        ])
     }
 
     @Test func extractsPidsFromThePidList() {
@@ -149,7 +180,8 @@ struct AndroidLogParsingTests {
         #expect(entry.tags == ["Analytics"])
         #expect(entry.eventName == "screen_view")
         #expect(entry.payloadId == "abc")
-        #expect(AppPackage.photoPrint.matches(line: entry.rawLine, platform: .android))
+        #expect(build("com.pictarine.photoprint").isAnalyticsLine(entry.rawLine))
+        #expect(!build("com.pictarine.picta.android").isAnalyticsLine(entry.rawLine))
     }
 
     @Test func parsesAdbDevices() {
@@ -181,5 +213,29 @@ struct AndroidLogParsingTests {
         4244 com.pictarine.photoprintx
         """
         #expect(AndroidBridge.pids(in: output, matching: "com.pictarine.photoprint") == ["4242", "4243"])
+    }
+}
+
+struct AppBuildTests {
+
+    @Test func groupsTheBuildsOfEachPlatformByApp() {
+        let ios = AppBuild.appGroups(for: .ios)
+        #expect(ios.map(\.appName) == ["Picta", "Walgreens", "CVS"])
+        #expect(ios[0].builds.map(\.menuLabel) == ["Prod · com.pictarine.picta.ios", "Int · com.pictarine.picta.ios.int"])
+        #expect(ios[2].builds.map(\.id) == ["com.pictarine.Photo-Print.cvs", "com.pictarine.Photo-Print.cvs.int"])
+        #expect(ios.flatMap(\.builds).allSatisfy { $0.platform == .ios })
+
+        let android = AppBuild.appGroups(for: .android)
+        #expect(android.map(\.appName) == ["PhotoPrint", "Pictadroid"])
+        #expect(android[0].builds.map(\.id) == ["com.pictarine.photoprint", "com.pictarine.photoprint.debug"])
+        #expect(android[1].builds.count == 4)
+    }
+
+    @Test func labelsBuildsByEnvironment() {
+        #expect(build("com.pictarine.picta.ios.int").shortLabel == "Picta · Int")
+        #expect(build("com.pictarine.photoprint").shortLabel == "PhotoPrint · Prod")
+        #expect(build("com.pictarine.photoprint.debug").environment == .integration)
+        #expect(build("com.pictarine.Photo-Print.int").processName == "Walgreens")
+        #expect(AppBuild.build(withID: "com.example.unknown") == nil)
     }
 }

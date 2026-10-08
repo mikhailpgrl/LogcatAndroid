@@ -10,14 +10,25 @@ struct PackageSelectorView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Picker("App", selection: $adbManager.selectedPackage) {
-                Text("All apps").tag(nil as AppPackage?)
-                ForEach(AppPackage.allCases) { package in
-                    Text(package.displayName).tag(package as AppPackage?)
+            // A menu rather than a plain picker, so the closed control reads "Picta · Int"
+            // while the items, grouped by app, carry the bundle identifiers
+            Menu {
+                Picker("App", selection: $adbManager.selectedBuild) {
+                    Text("All apps").tag(nil as AppBuild?)
+                    ForEach(AppBuild.appGroups(for: adbManager.currentPlatform), id: \.appName) { group in
+                        Section(group.appName) {
+                            ForEach(group.builds) { build in
+                                Text(build.menuLabel).tag(build as AppBuild?)
+                            }
+                        }
+                    }
                 }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            } label: {
+                Text(adbManager.selectedBuild?.shortLabel ?? "All apps")
             }
-            .pickerStyle(.menu)
-            .labelsHidden()
+            .fixedSize()
             // Flush left like the device picker above
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -30,8 +41,8 @@ struct PackageSelectorView: View {
             .labelsHidden()
             .controlSize(.small)
 
-            if let package = adbManager.selectedPackage {
-                Text(package.identifierSummary(for: adbManager.selectedDevice?.platform ?? .android))
+            if let build = adbManager.selectedBuild {
+                Text(build.id)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -39,7 +50,7 @@ struct PackageSelectorView: View {
 
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(adbManager.packagePids.isEmpty ? Color.orange : Color.green)
+                        .fill(adbManager.buildPids.isEmpty ? Color.orange : Color.green)
                         .frame(width: 6, height: 6)
                     Text(statusText)
                         .font(.caption2)
@@ -52,7 +63,7 @@ struct PackageSelectorView: View {
     }
 
     private var statusText: String {
-        let pids = adbManager.packagePids
+        let pids = adbManager.buildPids
         guard !pids.isEmpty else { return "App not running" }
         return pids.count == 1
             ? "PID \(pids[0])"
