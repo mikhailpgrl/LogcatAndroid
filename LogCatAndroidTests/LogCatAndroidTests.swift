@@ -232,3 +232,205 @@ struct IOSAppBuildTests {
     }
 }
 
+
+// MARK: - Device comparison
+
+struct LogComparatorTests {
+
+    private func android(_ message: String) -> LogEntry {
+        LogEntry.parse(line: "10-09 15:00:00.000  1234  5678 D Firebase: \(message)", index: 0)
+    }
+
+    private func ios(_ parameters: String, logId: String = "screen_view") -> LogEntry {
+        LogEntry.parse(
+            line: "Oct  9 15:00:00.000000 Picta[42] <Info>: 📝: register - logId=[\(logId)] parameters=[\(parameters)] eventVersion=[3.1.0] threadMain=[false]",
+            index: 0
+        )
+    }
+
+    @Test func matchingEventsAcrossPlatformsAreNotReported() {
+        // Same event and parameters: only the envelope (logId, eventVersion…) and the ids differ
+        let left = android("event=screen_view params={screen_name=home, screen_class=home, item_id=A1}")
+        let right = ios(#"{"screen_class":"home","screen_name":"home","item_id":"B2"}"#)
+
+        var comparator = LogComparator()
+        #expect(comparator.add(left, from: .left) == nil)
+        #expect(comparator.add(right, from: .right) == nil)
+        #expect(comparator.pairedCount == 1)
+        #expect(comparator.finish().isEmpty)
+    }
+
+    @Test func reportsDifferentValuesAndMissingFields() throws {
+        let left = android("event=screen_view params={screen_name=home, screen_class=home, source=push}")
+        let right = ios(#"{"screen_class":"Home","screen_name":"home","origin":"push"}"#)
+
+        let mismatch = try #require(LogComparator.compare(left: left, right: right))
+        #expect(mismatch.kind == .fieldsDiffer)
+        #expect(mismatch.eventName == "screen_view")
+        #expect(mismatch.differentValues == [.init(key: "screen_class", left: "home", right: "Home")])
+        #expect(mismatch.onlyOnLeft == ["source"])
+        #expect(mismatch.onlyOnRight == ["origin"])
+    }
+
+    @Test func ignoresTheValuesOfIDs() {
+        #expect(LogComparator.isIDKey("id"))
+        #expect(LogComparator.isIDKey("item_id"))
+        #expect(LogComparator.isIDKey("orderId"))
+        #expect(LogComparator.isIDKey("items[0].itemID"))
+        #expect(!LogComparator.isIDKey("screen_name"))
+        #expect(!LogComparator.isIDKey("paid"))
+
+        // Nested ids too, but a missing id field is still a missing field
+        let left = ios(#"{"items":[{"itemId":"4x6","quantity":2}]}"#, logId: "add_to_cart")
+        let right = ios(#"{"items":[{"itemId":"5x7","quantity":2}],"cart_id":"x"}"#, logId: "add_to_cart")
+        let mismatch = LogComparator.compare(left: left, right: right)
+        #expect(mismatch?.differentValues.isEmpty == true)
+        #expect(mismatch?.onlyOnRight == ["cart_id"])
+    }
+
+    @Test func flattensPhotoPrintPayloads() {
+        let entry = LogEntry.parse(
+            line: "10-09 15:00:00.000  1234  5678 D Analytics: LogDomainModel(id=abc, event=screen_view, value={screen=home, parameters={source=push}}, appVersion=1)",
+            index: 0
+        )
+        // The log's own id, the event name and the app version are envelope, not event fields
+        #expect(LogComparator.comparableFields(of: entry) == ["screen": "home", "source": "push"])
+    }
+
+    @Test func pairsEventsByNameInOrderAndReportsTheUnpaired() {
+        var comparator = LogComparator()
+        _ = comparator.add(android("event=screen_view params={screen_name=home}"), from: .left)
+        _ = comparator.add(android("event=add_to_cart params={value=3}"), from: .left)
+        // Pairs with the left `screen_view`, not with `add_to_cart` which came in between
+        #expect(comparator.add(ios(#"{"screen_name":"home"}"#), from: .right) == nil)
+        #expect(comparator.pairedCount == 1)
+
+        let unpaired = comparator.finish()
+        #expect(unpaired.map(\.eventName) == ["add_to_cart"])
+        #expect(unpaired.first?.kind == .missingOnOtherSide)
+        #expect(unpaired.first?.leftRawLine != nil && unpaired.first?.rightRawLine == nil)
+    }
+}
+
+// MARK: - Detail order
+
+struct DisplayFieldOrderTests {
+
+    @Test func listsTheEventFirstThenAlphabetically() {
+        let android = LogEntry.parse(
+            line: "10-09 15:00:00.000  1234  5678 D Firebase: event=screen_view params={screen_name=home, Item10=b, item2=a}",
+            index: 0
+        )
+        #expect(android.displayFields.map(\.key) == ["event", "params"])
+        // Nested objects too, case-insensitive with numbers in natural order
+        #expect(android.displayFields[1].children.map(\.key) == ["item2", "Item10", "screen_name"])
+
+        let ios = LogEntry.parse(
+            line: #"Oct  9 15:00:00.000000 Picta[42] <Info>: 📝: register - logId=[add_to_cart] parameters=[{"z":1,"items":[{"qty":2,"b":1},{"a":3}]}] eventVersion=[5.7.0] threadMain=[false]"#,
+            index: 0
+        )
+        #expect(ios.displayFields.map(\.key) == ["logId", "eventVersion", "parameters"])
+        let items = ios.displayFields[2].children.first { $0.key == "items" }
+        // List items keep their order, the objects inside them are sorted
+        #expect(items?.children.map(\.key) == ["[0]", "[1]"])
+        #expect(items?.children.first?.children.map(\.key) == ["b", "qty"])
+    }
+}
+
+// MARK: - Differences to the fix list
+
+struct MismatchFixCandidateTests {
+
+    @Test func splitsADifferenceIntoFixItems() throws {
+        let left = LogEntry.parse(line: "10-09 15:00:00.000  1234  5678 D Firebase: event=screen_view params={screen_class=home, source=push}", index: 0)
+        let right = LogEntry.parse(
+            line: #"Oct  9 15:00:00.000000 Picta[42] <Info>: 📝: register - logId=[screen_view] parameters=[{"screen_class":"Home","origin":"deeplink"}] eventVersion=[3.1.0] threadMain=[false]"#,
+            index: 0
+        )
+        let mismatch = try #require(LogComparator.compare(left: left, right: right))
+        let candidates = mismatch.fixCandidates(leftName: "Pixel", rightName: "iPhone")
+
+        #expect(candidates.map(\.fieldKey) == ["screen_class", "source", "origin"])
+        #expect(candidates[0].side == .left)
+        #expect(candidates[0].note == "screen_class differs: Pixel = home, iPhone = Home")
+        // A field logged by one device points at that device's log, with its value there
+        #expect(candidates[1].side == .left && candidates[1].fieldValue == "push")
+        #expect(candidates[2].side == .right && candidates[2].fieldValue == "deeplink")
+        #expect(candidates[2].note == "origin logged by iPhone but missing on Pixel")
+        #expect(mismatch.entry(for: .right)?.pid == "42")
+    }
+
+    @Test func aMissingEventIsOneFixItem() {
+        var comparator = LogComparator()
+        _ = comparator.add(LogEntry.parse(line: "10-09 15:00:00.000  1234  5678 D Firebase: event=purchase params={value=3}", index: 0), from: .left)
+        let mismatch = comparator.finish()[0]
+
+        #expect(mismatch.fixCandidates(leftName: "Pixel", rightName: "iPhone") == [MismatchFixCandidate(
+            kind: .missingEvent, side: .left, fieldKey: "event", fieldValue: "purchase",
+            note: "Logged by Pixel but not by iPhone", label: "Only logged by Pixel"
+        )])
+    }
+}
+
+// MARK: - Ignored differences
+
+struct CompareIgnoreRuleTests {
+
+    private func mismatch() throws -> CompareMismatch {
+        let left = LogEntry.parse(line: "10-09 15:00:00.000  1234  5678 D Firebase: event=screen_view params={screen_class=home, source=push, app_version=1}", index: 0)
+        let right = LogEntry.parse(
+            line: #"Oct  9 15:00:00.000000 Picta[42] <Info>: 📝: register - logId=[screen_view] parameters=[{"screen_class":"Home","origin":"deeplink","app_version":"2"}] eventVersion=[3.1.0] threadMain=[false]"#,
+            index: 0
+        )
+        return try #require(LogComparator.compare(left: left, right: right))
+    }
+
+    @Test func ignoringAValueKeepsTheFieldPresenceCompared() throws {
+        let filtered = try #require(try mismatch().applying([CompareIgnoreRule(kind: .value, key: "screen_class")]))
+        #expect(filtered.differentValues.map(\.key) == ["app_version"])
+        #expect(filtered.onlyOnLeft == ["source"])
+    }
+
+    @Test func ignoringAFieldHidesItsPresenceToo() throws {
+        let filtered = try #require(try mismatch().applying([
+            CompareIgnoreRule(kind: .field, key: "source"),
+            CompareIgnoreRule(kind: .field, key: "origin", eventName: "screen_view"),
+        ]))
+        #expect(filtered.onlyOnLeft.isEmpty && filtered.onlyOnRight.isEmpty)
+        #expect(filtered.differentValues.count == 2)
+    }
+
+    @Test func rulesLimitedToAnotherEventDoNotApply() throws {
+        let original = try mismatch()
+        #expect(original.applying([CompareIgnoreRule(kind: .value, key: "screen_class", eventName: "purchase")]) == original)
+    }
+
+    @Test func aFullyIgnoredDifferenceDisappears() throws {
+        let rules = [
+            CompareIgnoreRule(kind: .value, key: "screen_class"),
+            CompareIgnoreRule(kind: .value, key: "app_version"),
+            CompareIgnoreRule(kind: .field, key: "source"),
+            CompareIgnoreRule(kind: .field, key: "origin"),
+        ]
+        #expect(try mismatch().applying(rules) == nil)
+        #expect(try mismatch().applying([CompareIgnoreRule(kind: .event, key: "screen_view")]) == nil)
+    }
+
+    @Test func theStoreKeepsOneRuleOfEachKind() {
+        let store = CompareIgnoreStore()
+        let saved = store.rules
+        defer {
+            store.removeAll()
+            saved.forEach(store.add)
+        }
+        store.removeAll()
+
+        store.add(CompareIgnoreRule(kind: .value, key: "screen_class"))
+        store.add(CompareIgnoreRule(kind: .value, key: "screen_class"))
+        store.add(CompareIgnoreRule(kind: .value, key: "screen_class", eventName: "screen_view"))
+        #expect(store.rules.count == 2)
+
+        store.remove(store.rules[0])
+        #expect(store.rules.map(\.scope) == ["in screen_view"])
+    }
+}

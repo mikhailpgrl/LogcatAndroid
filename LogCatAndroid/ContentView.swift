@@ -13,7 +13,8 @@ struct ContentView: View {
     @StateObject private var iosLogs: IOSLogManager
     @StateObject private var devices: DeviceManager
     @StateObject private var themeManager = ThemeManager()
-    @StateObject private var fixList = FixListStore()
+    /// Shared with the compare window, which can flag logs too
+    @StateObject private var fixList = FixListStore.shared
     @StateObject private var androidProject = AndroidProjectManager()
 
     @State private var searchText: String = ""
@@ -25,6 +26,7 @@ struct ContentView: View {
     @State private var showOnboarding = false
     /// The setup screen opens by itself on the first launch only; the help button reopens it
     @AppStorage("hasSeenOnboarding") private var hasSeenOnboarding = false
+    @Environment(\.openWindow) private var openWindow
 
     /// Field path (e.g. `params.items[0].price`) briefly highlighted in the detail view after a reveal
     @State private var highlightedFieldPath: String? = nil
@@ -130,7 +132,15 @@ struct ContentView: View {
             VStack(spacing: 16) {
                 // Device section
                 SidebarSection(title: "Device", icon: "cable.connector") {
-                    DeviceSelectorView(devices: devices)
+                    DeviceSelectorView(devices: devices) { left, right in
+                        // The compare window follows the apps picked here, one per platform
+                        openWindow(id: "compare", value: CompareRequest(
+                            left: left,
+                            right: right,
+                            androidPackage: androidLogs.selectedPackage?.rawValue,
+                            iosBuildID: iosLogs.selectedBuild?.id
+                        ))
+                    }
                 }
 
                 // App section: each platform has its own apps
@@ -301,9 +311,12 @@ struct ContentView: View {
                 }
             }
             .toolbar {
-                // In the detail column's toolbar so it sits at the far right of the window.
-                // Reopens the setup screen shown on first launch, with the tools' install commands.
-                ToolbarItem(placement: .primaryAction) {
+                // In the detail column's toolbar, after a flexible spacer, so it sits at the far right
+                // of the window. Reopens the setup screen shown on first launch, with the install commands.
+                if #available(macOS 26.0, *) {
+                    ToolbarSpacer(.flexible)
+                }
+                ToolbarItem(placement: .automatic) {
                     Button {
                         showOnboarding = true
                     } label: {
@@ -601,14 +614,15 @@ struct LogDetailView: View {
                 .padding()
                 .glassCard()
 
-                // Parsed fields — each on its own row
-                if !entry.parsedFields.isEmpty {
+                // Parsed fields — each on its own row, the event name first, then alphabetically
+                let fields = entry.displayFields
+                if !fields.isEmpty {
                     VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(entry.parsedFields.enumerated()), id: \.offset) { index, field in
+                        ForEach(Array(fields.enumerated()), id: \.offset) { index, field in
                             FieldRowView(field: field, path: field.key, onAddToFixList: addToFixList,
                                          highlightedPath: highlightedFieldPath)
 
-                            if index < entry.parsedFields.count - 1 {
+                            if index < fields.count - 1 {
                                 Divider()
                                     .padding(.leading, 16)
                             }
@@ -969,5 +983,6 @@ struct MetadataChip: View {
         .clipShape(.capsule)
     }
 }
+
 
 

@@ -6,8 +6,8 @@
 import Foundation
 
 /// A device logs can be streamed from: an Android device seen by adb, or an iPhone seen by libimobiledevice
-struct Device: Identifiable, Hashable {
-    enum Platform: Hashable {
+struct Device: Identifiable, Hashable, Codable {
+    enum Platform: Hashable, Codable {
         case android
         case ios
 

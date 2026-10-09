@@ -15,6 +15,10 @@ class LogStreamManager: ObservableObject {
     @Published var logEntries: [LogEntry] = []
     @Published var isLogcatRunning = false
 
+    /// The entries that belong to the selected app. Every captured entry unless the platform
+    /// tells them apart at display time (see `IOSLogManager.attributedPids`).
+    var displayedEntries: [LogEntry] { logEntries }
+
     /// Index of the next entry of the current stream. Only touched by the stream's reader thread.
     private var entryIndex: Int = 0
 

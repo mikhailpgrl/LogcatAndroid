@@ -56,6 +56,10 @@ final class FixListStore: ObservableObject {
 
     private static let storageKey = "fixList"
 
+    /// The one store of the app: every window flags logs into it. Separate instances would each
+    /// save their own copy of the list over the others'.
+    static let shared = FixListStore()
+
     init() {
         load()
     }

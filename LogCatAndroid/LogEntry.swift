@@ -28,6 +28,32 @@ struct LogEntry: Identifiable, Equatable, Hashable {
         return tag.isEmpty ? "Unknown" : tag
     }
 
+    /// The fields that hold the event's name: `event` on Android, `logId` on iOS
+    static let eventNameKeys: Set<String> = ["event", "logId"]
+
+    /// The parsed fields in the order the detail view lists them: the event name first, then
+    /// alphabetically, object children included. List items keep their order (`[0]`, `[1]`…).
+    var displayFields: [ParsedField] {
+        Self.sortedForDisplay(parsedFields, isRoot: true)
+    }
+
+    private static func sortedForDisplay(_ fields: [ParsedField], isRoot: Bool) -> [ParsedField] {
+        let sortedChildren = fields.map { field in
+            // A list's own order is meaningful; only the objects inside it get sorted
+            ParsedField(key: field.key, value: field.value, kind: field.kind,
+                        children: sortedForDisplay(field.children, isRoot: false))
+        }
+        guard fields.first?.key.hasPrefix("[") != true else { return sortedChildren }
+
+        return sortedChildren.sorted { lhs, rhs in
+            let lhsIsEvent = isRoot && eventNameKeys.contains(lhs.key)
+            let rhsIsEvent = isRoot && eventNameKeys.contains(rhs.key)
+            if lhsIsEvent != rhsIsEvent { return lhsIsEvent }
+            // Case-insensitive, with numbers in natural order: `item2` before `item10`
+            return lhs.key.localizedStandardCompare(rhs.key) == .orderedAscending
+        }
+    }
+
     /// The `id` field of the payload, when the app logs one (PhotoPrint's `LogDomainModel(id=...)`)
     var payloadId: String? {
         parsedFields.first(where: { $0.key == "id" })?.value

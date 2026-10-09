@@ -9,6 +9,8 @@ import SwiftUI
 
 struct DeviceSelectorView: View {
     @ObservedObject var devices: DeviceManager
+    /// Opens the compare window for the two connected devices
+    var onCompare: (Device, Device) -> Void = { _, _ in }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -18,16 +20,29 @@ struct DeviceSelectorView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                Picker("Device", selection: $devices.selectedDeviceID) {
-                    ForEach(devices.connectedDevices) { device in
-                        Label(device.displayName, systemImage: device.platform.symbol)
-                            .tag(device.id as String?)
+                HStack(spacing: 6) {
+                    Picker("Device", selection: $devices.selectedDeviceID) {
+                        ForEach(devices.connectedDevices) { device in
+                            Label(device.displayName, systemImage: device.platform.symbol)
+                                .tag(device.id as String?)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    // Keep the popup flush left, in line with the other sidebar controls
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    // Only with exactly two devices: there is then no doubt about what to compare
+                    if devices.connectedDevices.count == 2 {
+                        Button {
+                            onCompare(devices.connectedDevices[0], devices.connectedDevices[1])
+                        } label: {
+                            Label("Compare", systemImage: "rectangle.split.2x1")
+                                .labelStyle(.titleAndIcon)
+                        }
+                        .help("Compare the logs of the two devices side by side")
                     }
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                // Keep the popup flush left, in line with the other sidebar controls
-                .frame(maxWidth: .infinity, alignment: .leading)
 
                 if let device = devices.selectedDevice {
                     Label(device.platform.displayName, systemImage: device.platform.symbol)

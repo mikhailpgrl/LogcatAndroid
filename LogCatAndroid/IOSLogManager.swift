@@ -214,6 +214,12 @@ final class IOSLogManager: LogStreamManager {
 
     // MARK: - Build Attribution
 
+    /// Only the selected build's entries: the other builds of its app share the stream
+    override var displayedEntries: [LogEntry] {
+        guard let attributedPids else { return logEntries }
+        return logEntries.filter { attributedPids.contains($0.pid) }
+    }
+
     /// Captured entries hidden from the display because another build of the app emitted them
     /// (e.g. Prod is selected while Int is the one being used: both run as the same process)
     var hiddenEntries: [LogEntry] {

@@ -166,12 +166,29 @@ class ThemeManager: ObservableObject {
     @Published var currentTheme: AppTheme {
         didSet {
             UserDefaults.standard.set(currentTheme.id, forKey: "selectedThemeID")
+            Self.applyAppearance(of: currentTheme)
         }
     }
 
     init() {
+        self.currentTheme = Self.savedTheme
+    }
+
+    /// The theme picked last time, or the default one
+    static var savedTheme: AppTheme {
         let savedID = UserDefaults.standard.string(forKey: "selectedThemeID") ?? "default"
-        self.currentTheme = AppTheme.allThemes.first { $0.id == savedID } ?? .defaultLight
+        return AppTheme.allThemes.first { $0.id == savedID } ?? .defaultLight
+    }
+
+    /// Gives every window the theme's light or dark appearance (`nil` follows the system).
+    /// `.preferredColorScheme` alone only reaches a window once it is on screen: a dark theme on a
+    /// Mac in light mode would flash light at launch. Called before the first window shows up.
+    static func applyAppearance(of theme: AppTheme) {
+        switch theme.preferredScheme {
+        case .dark?: NSApp?.appearance = NSAppearance(named: .darkAqua)
+        case .light?: NSApp?.appearance = NSAppearance(named: .aqua)
+        default: NSApp?.appearance = nil
+        }
     }
 }
 
