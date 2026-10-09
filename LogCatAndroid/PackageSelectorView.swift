@@ -5,8 +5,9 @@
 
 import SwiftUI
 
+/// The Android app picker. iOS apps are picked in `IOSAppSelectorView`.
 struct PackageSelectorView: View {
-    @ObservedObject var adbManager: ADBManager
+    @ObservedObject var adbManager: AndroidLogManager
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -21,18 +22,7 @@ struct PackageSelectorView: View {
             // Flush left like the device picker above
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            if let package = adbManager.selectedPackage, adbManager.selectedPlatform == .ios {
-                // idevicesyslog filters by process name: there are no PIDs to resolve
-                Text("Process: \(package.iosProcessNames.joined(separator: ", "))")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-
-                Text("Filtered by process name")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            } else if let package = adbManager.selectedPackage {
+            if let package = adbManager.selectedPackage {
                 Text("\(package.packageName) (+ debug)")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)

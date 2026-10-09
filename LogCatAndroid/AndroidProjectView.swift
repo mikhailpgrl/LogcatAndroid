@@ -9,7 +9,7 @@ import SwiftUI
 /// that assembles the app with Gradle and launches it on the selected device.
 struct AndroidProjectView: View {
     @ObservedObject var project: AndroidProjectManager
-    @ObservedObject var adbManager: ADBManager
+    @ObservedObject var adbManager: AndroidLogManager
     /// Called with the package name once the app is running on the device
     var onLaunched: ((String) -> Void)? = nil
 
@@ -29,7 +29,7 @@ struct AndroidProjectView: View {
     }
 
     private func buildAndRun() {
-        guard let device = adbManager.selectedAndroidSerial else { return }
+        guard let device = adbManager.selectedDevice else { return }
         Task {
             if let package = await project.buildAndRun(device: device, adbPath: adbManager.adbPath) {
                 onLaunched?(package)
@@ -177,8 +177,8 @@ struct AndroidProjectView: View {
             }
             .glassButtons()
             .controlSize(.regular)
-            .disabled(adbManager.selectedAndroidSerial == nil || project.selectedModule == nil)
-            .help(adbManager.selectedAndroidSerial == nil
+            .disabled(adbManager.selectedDevice == nil || project.selectedModule == nil)
+            .help(adbManager.selectedDevice == nil
                   ? "Connect an Android device first"
                   : "Build the selected variant, install it and launch it on the device")
         }

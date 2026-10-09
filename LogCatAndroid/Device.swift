@@ -32,4 +32,11 @@ struct Device: Identifiable, Hashable {
     /// Human readable name: the iPhone's name when it could be resolved, otherwise the identifier
     let name: String
     let platform: Platform
+    /// Reached over the network (Wi-Fi sync on iOS) rather than USB
+    var isWireless = false
+
+    /// The name shown in the device picker
+    var displayName: String {
+        isWireless ? "\(name) · Wi-Fi" : name
+    }
 }

@@ -8,7 +8,10 @@
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var adbManager = ADBManager()
+    /// Android and iOS logs are streamed by separate managers; `devices` routes the selected device to its own
+    @StateObject private var androidLogs: AndroidLogManager
+    @StateObject private var iosLogs: IOSLogManager
+    @StateObject private var devices: DeviceManager
     @StateObject private var themeManager = ThemeManager()
     @StateObject private var fixList = FixListStore()
     @StateObject private var androidProject = AndroidProjectManager()
@@ -29,10 +32,23 @@ struct ContentView: View {
     /// (gone from the buffer after a restart, or hidden by the current search/level filter)
     @State private var detachedEntry: LogEntry? = nil
 
+    init() {
+        let android = AndroidLogManager()
+        let ios = IOSLogManager()
+        _androidLogs = StateObject(wrappedValue: android)
+        _iosLogs = StateObject(wrappedValue: ios)
+        _devices = StateObject(wrappedValue: DeviceManager(android: android, ios: ios))
+    }
+
+    /// The log manager of the selected device's platform, whose logs are displayed
+    private var logs: LogStreamManager {
+        devices.selectedPlatform == .ios ? iosLogs : androidLogs
+    }
+
     /// The selected entry, looked up by id so tags merged after selection show up in the detail view
     private var selectedEntry: LogEntry? {
         guard let selectedEntryID else { return nil }
-        return adbManager.logEntries.first { $0.id == selectedEntryID }
+        return logs.logEntries.first { $0.id == selectedEntryID }
     }
 
     /// What the detail column shows: the list selection first, otherwise a revealed entry
@@ -40,7 +56,7 @@ struct ContentView: View {
 
     /// Opens the log a fix item was taken from and flashes the flagged field for a second
     private func reveal(_ item: FixItem) {
-        if let live = adbManager.logEntries.first(where: { $0.id == item.entryID }) {
+        if let live = logs.logEntries.first(where: { $0.id == item.entryID }) {
             selectedEntryID = live.id
             scrollTargetID = live.id
             // Also keep it as the detached entry in case the list filter hides the row
@@ -67,7 +83,7 @@ struct ContentView: View {
     /// Every logger tag seen in the current buffer, for the filter bar
     var availableTags: [String] {
         var seen: Set<String> = []
-        for entry in adbManager.logEntries {
+        for entry in logs.logEntries {
             seen.formUnion(entry.tags)
         }
         return seen.sorted()
@@ -75,7 +91,12 @@ struct ContentView: View {
 
     /// Filtered entries based on tags, search text and log level, reversed so newest is first
     var filteredEntries: [LogEntry] {
-        var entries = adbManager.logEntries
+        var entries = logs.logEntries
+
+        // iOS builds of an app share their process: keep the selected build's PIDs
+        if devices.selectedPlatform == .ios, let pids = iosLogs.attributedPids {
+            entries = entries.filter { pids.contains($0.pid) }
+        }
 
         if !selectedTags.isEmpty {
             // A merged entry carries several tags: keep it if any of them is selected
@@ -106,27 +127,31 @@ struct ContentView: View {
             VStack(spacing: 16) {
                 // Device section
                 SidebarSection(title: "Device", icon: "cable.connector") {
-                    DeviceSelectorView(adbManager: adbManager)
+                    DeviceSelectorView(devices: devices)
                 }
 
-                // App package section
+                // App section: each platform has its own apps
                 SidebarSection(title: "App", icon: "app.badge") {
-                    PackageSelectorView(adbManager: adbManager)
+                    if devices.selectedPlatform == .ios {
+                        IOSAppSelectorView(iosLogs: iosLogs)
+                    } else {
+                        PackageSelectorView(adbManager: androidLogs)
+                    }
                 }
 
                 // Android project: branch, build and run on the selected device
                 SidebarSection(title: "Project", icon: "hammer") {
-                    if adbManager.selectedPlatform == .ios {
+                    if devices.selectedPlatform == .ios {
                         // Gradle build & run only targets Android devices
                         Text("Build & Run is available for Android devices only.")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        AndroidProjectView(project: androidProject, adbManager: adbManager) { packageName in
+                        AndroidProjectView(project: androidProject, adbManager: androidLogs) { packageName in
                             // Follow the app that was just launched when it is one of the known packages
                             if let package = AppPackage.allCases.first(where: { $0.packageNames.contains(packageName) }) {
-                                adbManager.selectedPackage = package
+                                androidLogs.selectedPackage = package
                             }
                         }
                     }
@@ -151,26 +176,26 @@ struct ContentView: View {
                     VStack(spacing: 8) {
                         HStack(spacing: 8) {
                             Button {
-                                adbManager.startLogcat()
+                                logs.startLogcat()
                             } label: {
                                 Label("Start", systemImage: "play.fill")
                                     .frame(maxWidth: .infinity)
                             }
-                            .disabled(adbManager.isLogcatRunning)
+                            .disabled(logs.isLogcatRunning)
 
                             Button {
-                                adbManager.stopLogcat()
+                                logs.stopLogcat()
                             } label: {
                                 Label("Stop", systemImage: "stop.fill")
                                     .frame(maxWidth: .infinity)
                             }
-                            .disabled(!adbManager.isLogcatRunning)
+                            .disabled(!logs.isLogcatRunning)
                         }
                         .glassButtons()
                         .controlSize(.regular)
 
                         Button(role: .destructive) {
-                            adbManager.clearLogs()
+                            logs.clearLogs()
                         } label: {
                             Label("Clear All Logs", systemImage: "trash")
                                 .frame(maxWidth: .infinity)
@@ -196,13 +221,13 @@ struct ContentView: View {
                 // Status bar at the bottom
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(adbManager.isLogcatRunning ? Color.green : Color.red)
+                        .fill(logs.isLogcatRunning ? Color.green : Color.red)
                         .frame(width: 8, height: 8)
-                    Text(adbManager.isLogcatRunning ? "Running" : "Stopped")
+                    Text(logs.isLogcatRunning ? "Running" : "Stopped")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Text("\(adbManager.logEntries.count) logs")
+                    Text("\(logs.logEntries.count) logs")
                         .font(.caption2)
                         .monospacedDigit()
                         .foregroundStyle(.tertiary)
@@ -221,7 +246,7 @@ struct ContentView: View {
                         Text("Logs")
                             .font(.title3.weight(.semibold))
                         Spacer()
-                        Text("\(filteredEntries.count) / \(adbManager.logEntries.count)")
+                        Text("\(filteredEntries.count) / \(logs.logEntries.count)")
                             .font(.caption)
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
@@ -284,7 +309,7 @@ struct ContentView: View {
         // No window title text: the icon + name plays that role
         .toolbar(removing: .title)
         .onAppear {
-            adbManager.refreshDevices()
+            devices.refreshDevices()
         }
         .onChange(of: selectedEntryID) {
             // Picking another row in the list dismisses a revealed entry
@@ -326,7 +351,7 @@ struct ContentView: View {
             .listStyle(.inset)
             .scrollContentBackground(.hidden)
             .background(themeManager.currentTheme.background)
-            .onChange(of: adbManager.logEntries.count) {
+            .onChange(of: logs.logEntries.count) {
                 // Auto-scroll to the newest entry (top) only when nothing is selected
                 if selectedEntryID == nil, let first = filteredEntries.first {
                     withAnimation {

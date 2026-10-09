@@ -20,9 +20,9 @@ struct LogEntry: Identifiable, Equatable, Hashable {
     /// The primary tag (the first one this event was seen with)
     var tag: String { tags.first ?? "" }
 
-    /// The event name: uses the "event" field if available, otherwise the tag
+    /// The event name: uses the "event" field (`logId` on iOS) if available, otherwise the tag
     var eventName: String {
-        if let eventField = parsedFields.first(where: { $0.key == "event" }) {
+        if let eventField = parsedFields.first(where: { $0.key == "event" || $0.key == "logId" }) {
             return eventField.value
         }
         return tag.isEmpty ? "Unknown" : tag
@@ -134,26 +134,38 @@ struct LogEntry: Identifiable, Equatable, Hashable {
     static func extractMessage(from line: String) -> String? {
         // Columns: date, time, PID, TID, level, then "TAG: MESSAGE"
         let columns = line.split(separator: " ", maxSplits: 5, omittingEmptySubsequences: true)
-        guard columns.count == 6, Int(columns[2]) != nil else {
-            return extractIOSSyslogMessage(from: line)
-        }
+        guard columns.count == 6, Int(columns[2]) != nil else { return nil }
         let tagAndMessage = columns[5]
         guard let separator = tagAndMessage.range(of: ": ") else { return nil }
         return String(tagAndMessage[separator.upperBound...]).trimmingCharacters(in: .whitespaces)
     }
 
-    /// Message part of an idevicesyslog line: everything after the `[PID] <Level>: ` marker
-    private static func extractIOSSyslogMessage(from line: String) -> String? {
-        guard let marker = line.range(of: #"\[\d+\]\s+<[A-Za-z]+>:\s?"#, options: .regularExpression) else {
-            return nil
+    /// Parses a log line, either from Android's logcat or from an iOS device's syslog
+    /// (see `LogEntry+IOS.swift`). The two formats are disjoint, so stored raw lines
+    /// (fix list) can be re-parsed without knowing their platform.
+    static func parse(line: String, index: Int) -> LogEntry {
+        if let entry = parseLogcat(line: line, index: index) ?? parseIOS(line: line, index: index) {
+            return entry
         }
-        return String(line[marker.upperBound...]).trimmingCharacters(in: .whitespaces)
+
+        let fields = parseKotlinDataClass(line)
+        return LogEntry(
+            id: UUID(),
+            timestamp: "",
+            pid: "",
+            tid: "",
+            level: .unknown,
+            tags: [],
+            message: line,
+            rawLine: line,
+            index: index,
+            parsedFields: fields
+        )
     }
 
-    /// Parse a log line, either an Android logcat line in the standard format
+    /// Parse an Android logcat line in the standard format:
     /// `MM-DD HH:MM:SS.mmm  PID  TID LEVEL TAG: MESSAGE`
-    /// or an iOS idevicesyslog line (see `parseIOSSyslog`).
-    static func parse(line: String, index: Int) -> LogEntry {
+    private static func parseLogcat(line: String, index: Int) -> LogEntry? {
         let pattern = #"^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+(\d+)\s+(\d+)\s+([VDIWEFS])\s+(.+?):\s+(.*)"#
 
         if let match = line.range(of: pattern, options: .regularExpression) {
@@ -179,72 +191,7 @@ struct LogEntry: Identifiable, Equatable, Hashable {
             }
         }
 
-        if let entry = parseIOSSyslog(line: line, index: index) {
-            return entry
-        }
-
-        let fields = parseKotlinDataClass(line)
-        return LogEntry(
-            id: UUID(),
-            timestamp: "",
-            pid: "",
-            tid: "",
-            level: .unknown,
-            tags: [],
-            message: line,
-            rawLine: line,
-            index: index,
-            parsedFields: fields
-        )
-    }
-
-    // MARK: - iOS syslog
-
-    /// `MMM DD HH:MM:SS[.ffffff] <device> <process>[(<library>)][<pid>] <<Level>>: <message>`, e.g.
-    /// `Oct  7 14:03:21 Mikhails-iPhone PhotoPrint(Foundation)[1234] <Notice>: Analytics ...`.
-    /// The process name is matched lazily so the optional `(library)` group is not swallowed into it.
-    private static let iosSyslogRegex = try? NSRegularExpression(
-        pattern: #"^([A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(\S+)\s+(.+?)(?:\(([^)]*)\))?\[(\d+)\]\s+<([A-Za-z]+)>:\s?(.*)$"#
-    )
-
-    /// Parses a line printed by libimobiledevice's `idevicesyslog`, or returns `nil` when it is not one.
-    /// iOS has no thread id in this output, so `tid` is empty; the process name is used as the tag.
-    static func parseIOSSyslog(line: String, index: Int) -> LogEntry? {
-        guard let regex = iosSyslogRegex else { return nil }
-        let range = NSRange(line.startIndex..., in: line)
-        guard let match = regex.firstMatch(in: line, range: range) else { return nil }
-
-        func group(_ number: Int) -> String {
-            let groupRange = match.range(at: number)
-            guard groupRange.location != NSNotFound, let swiftRange = Range(groupRange, in: line) else { return "" }
-            return String(line[swiftRange])
-        }
-
-        let message = group(7).trimmingCharacters(in: .whitespaces)
-        return LogEntry(
-            id: UUID(),
-            timestamp: group(1),
-            pid: group(5),
-            tid: "",
-            level: iosLevel(group(6)),
-            tags: [group(3).trimmingCharacters(in: .whitespaces)],
-            message: message,
-            rawLine: line,
-            index: index,
-            parsedFields: parseKotlinDataClass(message)
-        )
-    }
-
-    /// Maps an Apple unified logging level word to the closest logcat level
-    static func iosLevel(_ word: String) -> LogLevel {
-        switch word.lowercased() {
-        case "notice", "info": return .info
-        case "debug": return .debug
-        case "warning": return .warning
-        case "error": return .error
-        case "fault", "critical", "alert", "emergency": return .fatal
-        default: return .unknown
-        }
+        return nil
     }
 
     // MARK: - Payload parsing

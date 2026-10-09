@@ -8,19 +8,19 @@
 import SwiftUI
 
 struct DeviceSelectorView: View {
-    @ObservedObject var adbManager: ADBManager
+    @ObservedObject var devices: DeviceManager
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if adbManager.connectedDevices.isEmpty {
+            if devices.connectedDevices.isEmpty {
                 Text("No devices connected")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                Picker("Device", selection: $adbManager.selectedDevice) {
-                    ForEach(adbManager.connectedDevices) { device in
-                        Label(device.name, systemImage: device.platform.symbol)
+                Picker("Device", selection: $devices.selectedDeviceID) {
+                    ForEach(devices.connectedDevices) { device in
+                        Label(device.displayName, systemImage: device.platform.symbol)
                             .tag(device.id as String?)
                     }
                 }
@@ -29,7 +29,7 @@ struct DeviceSelectorView: View {
                 // Keep the popup flush left, in line with the other sidebar controls
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                if let device = adbManager.selectedDeviceInfo {
+                if let device = devices.selectedDevice {
                     Label(device.platform.displayName, systemImage: device.platform.symbol)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -37,8 +37,9 @@ struct DeviceSelectorView: View {
                 }
             }
 
-            if let message = adbManager.toolMessage {
-                Label(message, systemImage: "exclamationmark.triangle")
+            if devices.isMissingIOSTools {
+                Label("iPhones need libimobiledevice: \(IOSLogManager.installCommand)",
+                      systemImage: "exclamationmark.triangle")
                     .font(.caption2)
                     .foregroundStyle(.orange)
                     .textSelection(.enabled)
@@ -46,7 +47,7 @@ struct DeviceSelectorView: View {
             }
 
             Button {
-                adbManager.refreshDevices()
+                devices.refreshDevices()
             } label: {
                 Label("Refresh Devices", systemImage: "arrow.clockwise")
                     .frame(maxWidth: .infinity)
