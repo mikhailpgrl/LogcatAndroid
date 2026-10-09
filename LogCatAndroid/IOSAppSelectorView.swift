@@ -53,6 +53,23 @@ struct IOSAppSelectorView: View {
                 }
             }
 
+            // The builds of an app share their process: events of the build not selected are captured
+            // but hidden. Say so, otherwise using Int while Prod is selected shows an empty list.
+            let hiddenCount = iosLogs.hiddenEntries.count
+            if hiddenCount > 0 {
+                Label("\(hiddenCount) event\(hiddenCount == 1 ? "" : "s") from another build hidden",
+                      systemImage: "eye.slash")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+
+                if let owner = iosLogs.buildOfHiddenEntries {
+                    Button("Show \(owner.shortLabel)") {
+                        iosLogs.selectedBuild = owner
+                    }
+                    .controlSize(.small)
+                }
+            }
+
             if let message = iosLogs.toolMessage {
                 Label(message, systemImage: "exclamationmark.triangle")
                     .font(.caption2)

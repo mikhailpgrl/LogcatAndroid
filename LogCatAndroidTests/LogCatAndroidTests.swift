@@ -232,33 +232,3 @@ struct IOSAppBuildTests {
     }
 }
 
-// TEMP live probe
-struct LiveIOSProbe {
-    @Test func appWiringWithBothDevices() async throws {
-        let (devices, android, ios) = await MainActor.run { () -> (DeviceManager, AndroidLogManager, IOSLogManager) in
-            let android = AndroidLogManager()
-            let ios = IOSLogManager()
-            let devices = DeviceManager(android: android, ios: ios)
-            devices.refreshDevices()
-            return (devices, android, ios)
-        }
-        try await Task.sleep(for: .seconds(4))
-        await MainActor.run {
-            print("PROBE devices=\(devices.connectedDevices.map { "\($0.platform.displayName):\($0.id)" }) selected=\(devices.selectedDeviceID ?? "nil") androidRunning=\(android.isLogcatRunning)")
-            print("PROBE iosBuild=\(ios.selectedBuild?.id ?? "all apps")")
-            // Like the user: pick the iPhone, then press Start on the displayed manager
-            devices.selectedDeviceID = devices.connectedDevices.first { $0.platform == .ios }?.id
-            let logs: LogStreamManager = devices.selectedPlatform == .ios ? ios : android
-            print("PROBE platform=\(devices.selectedPlatform.displayName) logsIsIOS=\(logs === ios) iosDevice=\(ios.selectedDevice?.id ?? "nil")")
-            logs.startLogcat()
-        }
-        for i in 1...12 {
-            try await Task.sleep(for: .seconds(10))
-            await MainActor.run {
-                let shown = ios.logEntries.filter { e in ios.attributedPids.map { $0.contains(e.pid) } ?? true }
-                print("PROBE t=\(i*10)s iosRunning=\(ios.isLogcatRunning) androidRunning=\(android.isLogcatRunning) entries=\(ios.logEntries.count) shown=\(shown.count) pids=\(ios.buildPids) attributed=\((ios.attributedPids ?? []).sorted())")
-            }
-        }
-        await MainActor.run { ios.stopLogcat(); android.stopLogcat() }
-    }
-}

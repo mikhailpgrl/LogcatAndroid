@@ -22,6 +22,9 @@ struct ContentView: View {
     @State private var selectedTags: Set<String> = []
     @State private var selectedEntryID: LogEntry.ID? = nil
     @State private var showSettings = false
+    @State private var showOnboarding = false
+    /// The setup screen opens by itself on the first launch only; the help button reopens it
+    @AppStorage("hasSeenOnboarding") private var hasSeenOnboarding = false
 
     /// Field path (e.g. `params.items[0].price`) briefly highlighted in the detail view after a reveal
     @State private var highlightedFieldPath: String? = nil
@@ -286,14 +289,28 @@ struct ContentView: View {
             }
             .navigationSplitViewColumnWidth(min: 300, ideal: 400, max: 600)
         } detail: {
-            if let entry = detailEntry {
-                LogDetailView(entry: entry, fixList: fixList, highlightedFieldPath: highlightedFieldPath)
-            } else {
-                ContentUnavailableView(
-                    "Select a Log",
-                    systemImage: "doc.text.magnifyingglass",
-                    description: Text("Choose a log entry from the list to view its details.")
-                )
+            Group {
+                if let entry = detailEntry {
+                    LogDetailView(entry: entry, fixList: fixList, highlightedFieldPath: highlightedFieldPath)
+                } else {
+                    ContentUnavailableView(
+                        "Select a Log",
+                        systemImage: "doc.text.magnifyingglass",
+                        description: Text("Choose a log entry from the list to view its details.")
+                    )
+                }
+            }
+            .toolbar {
+                // In the detail column's toolbar so it sits at the far right of the window.
+                // Reopens the setup screen shown on first launch, with the tools' install commands.
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showOnboarding = true
+                    } label: {
+                        Label("Help", systemImage: "questionmark.circle")
+                    }
+                    .help("Show the setup guide and the tools' install commands")
+                }
             }
         }
         .toolbar {
@@ -310,6 +327,11 @@ struct ContentView: View {
         .toolbar(removing: .title)
         .onAppear {
             devices.refreshDevices()
+            if !hasSeenOnboarding {
+                // Recorded as soon as it is shown, so quitting with the sheet open does not bring it back
+                hasSeenOnboarding = true
+                showOnboarding = true
+            }
         }
         .onChange(of: selectedEntryID) {
             // Picking another row in the list dismisses a revealed entry
@@ -319,6 +341,12 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView(themeManager: themeManager)
+        }
+        .sheet(isPresented: $showOnboarding, onDismiss: {
+            // Newly installed tools can list their devices now
+            devices.refreshDevices()
+        }) {
+            OnboardingView()
         }
         .environment(\.appTheme, themeManager.currentTheme)
         .preferredColorScheme(themeManager.currentTheme.preferredScheme)

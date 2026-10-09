@@ -3,7 +3,7 @@
 //  LogCatAndroid
 //
 
-import Foundation
+import AppKit
 
 /// Lists the Android and iOS devices plugged in and hands the selected one to its platform's
 /// log manager. Android and iOS logs are streamed separately (`AndroidLogManager`, `IOSLogManager`):
@@ -35,6 +35,16 @@ final class DeviceManager: ObservableObject {
     init(android: AndroidLogManager, ios: IOSLogManager) {
         self.android = android
         self.ios = ios
+
+        // Child processes outlive the app: without this, every quit leaves an `adb logcat` or
+        // `idevicesyslog` running in the background. Posted synchronously on the main thread.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: nil
+        ) { _ in
+            // Safe when nothing runs: there is no process to terminate then
+            android.stopLogcat()
+            ios.stopLogcat()
+        }
     }
 
     /// The selected device's full description

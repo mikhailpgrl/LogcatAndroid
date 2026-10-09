@@ -45,7 +45,10 @@ final class AndroidLogManager: LogStreamManager {
 
     private static let selectedPackageKey = "selectedPackage"
 
-    let adbPath: String = "/opt/homebrew/bin/adb"
+    /// Where adb is run from, also checked by the setup screen
+    static let adbPath = "/opt/homebrew/bin/adb"
+
+    var adbPath: String { Self.adbPath }
 
     override init() {
         super.init()

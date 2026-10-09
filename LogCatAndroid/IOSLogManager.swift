@@ -214,12 +214,37 @@ final class IOSLogManager: LogStreamManager {
 
     // MARK: - Build Attribution
 
+    /// Captured entries hidden from the display because another build of the app emitted them
+    /// (e.g. Prod is selected while Int is the one being used: both run as the same process)
+    var hiddenEntries: [LogEntry] {
+        guard let attributedPids else { return [] }
+        return logEntries.filter { !attributedPids.contains($0.pid) }
+    }
+
+    /// The build that emitted the hidden entries, to offer switching to it: told by `devicectl` when it
+    /// attributed their process, otherwise the selection's sibling when its app has only two builds
+    var buildOfHiddenEntries: IOSAppBuild? {
+        guard let build = selectedBuild, let device = selectedDevice,
+              let pid = hiddenEntries.last?.pid else { return nil }
+        let siblings = IOSAppBuild.all.filter { $0.processName == build.processName && $0 != build }
+        if let bundleID = attribution.cachedBundleIdentifier(of: pid, on: device),
+           let owner = siblings.first(where: { $0.id == bundleID }) {
+            return owner
+        }
+        return siblings.count == 1 ? siblings[0] : nil
+    }
+
     /// Called on the main queue whenever the user picks another build
     private func buildSelectionChanged(from oldValue: IOSAppBuild?) {
         guard oldValue != selectedBuild else { return }
         UserDefaults.standard.set(selectedBuild?.id, forKey: Self.selectedBuildKey)
 
-        if isLogcatRunning {
+        if isLogcatRunning, let oldValue, let selectedBuild, oldValue.processName == selectedBuild.processName {
+            // Another build of the same app (Prod ↔ Int): the stream already carries its events,
+            // only the attribution changes. Keep the buffer so the hidden entries show up right away.
+            attributedPids = []
+            refreshBuildPids()
+        } else if isLogcatRunning {
             // The buffered logs belong to the previous app: restart from a clean slate
             stopLogcat()
             clearLogs()
@@ -265,7 +290,9 @@ final class IOSLogManager: LogStreamManager {
 
         publishBuildPids(pids)
         DispatchQueue.main.async {
-            // Only while a stream attributes PIDs: stopped, the display keeps what was captured
+            // Only while a stream attributes PIDs: stopped, the display keeps what was captured.
+            // A result for a build that was deselected meanwhile must not be attributed to the new one.
+            guard self.selectedBuild == build else { return }
             if let attributed = self.attributedPids, !pids.isSubset(of: attributed) {
                 self.attributedPids = attributed.union(pids)
             }
@@ -434,6 +461,13 @@ final class ProcessAttribution {
             lock.unlock()
         }
         return bundleIDs.filter { pids.contains($0.key) }
+    }
+
+    /// The bundle identifier of `pid` from the last devicectl run, without running it again
+    func cachedBundleIdentifier(of pid: String, on device: Device) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return bundleIDsByDevice[device.id]?[pid]
     }
 
     private static func fetchBundleIdentifiers(device: Device) -> [String: String]? {
